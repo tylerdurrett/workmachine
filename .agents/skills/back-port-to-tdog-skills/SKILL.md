@@ -1,1 +1,0 @@
-The tdog skills repo is here on this machine: `/Users/tylerdurrett/Desktop/v47/repos/tdog/skills/README.md`

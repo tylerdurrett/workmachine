@@ -49,3 +49,6 @@ desktop.ini
 # Misc
 tmp/
 temp/
+
+# Per-machine pointer to the local tdog skills library checkout (see backport-skill)
+.tdog-skills-path
