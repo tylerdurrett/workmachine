@@ -1,0 +1,1 @@
+- Any instructions in this file must be VERY concise since this loads in every agent session. Add a short instruction and link out to a more detailed doc.
