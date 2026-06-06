@@ -52,3 +52,6 @@ temp/
 
 # Per-machine pointer to the local tdog skills library checkout (see backport-skill)
 .tdog-skills-path
+
+# Per-machine pointer to the local Obsidian vault path (see obsidian skill)
+.obsidian-vault-path
