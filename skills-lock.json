@@ -37,6 +37,12 @@
       "skillPath": "skills/defer/SKILL.md",
       "computedHash": "501914d2bb7fecc9e4148e32a7a30ebb7b6d92a21dc3853f357a6b6e80c9f430"
     },
+    "design-an-interface": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/deprecated/design-an-interface/SKILL.md",
+      "computedHash": "885b05367fb1cf61a1e27e0d50f14d2502a05c1fa276c6e9ea050ce6a90e7095"
+    },
     "diagnose": {
       "source": "tylerdurrett/skills",
       "sourceType": "github",
@@ -55,11 +61,23 @@
       "skillPath": "skills/grill-with-docs/SKILL.md",
       "computedHash": "c9c8f83f45a6a37a943acbf035e460914299b50d3a9305035fdb07ee21de3c03"
     },
+    "handoff": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/productivity/handoff/SKILL.md",
+      "computedHash": "1a78d774f8a59db5daa6e65e20a6596872fa8cde769f9a6e3a09b678dd5ae8cc"
+    },
     "improve-codebase-architecture": {
       "source": "tylerdurrett/skills",
       "sourceType": "github",
       "skillPath": "skills/improve-codebase-architecture/SKILL.md",
       "computedHash": "c77b86b4332919499608f9af1880074e1fec65a59b95c70c27a9f39cd137865e"
+    },
+    "request-refactor-plan": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/deprecated/request-refactor-plan/SKILL.md",
+      "computedHash": "176cf1d0c4dc4fc4d958c4bc4ed67f222f2656bda2f3f15e3a3e98b2e5edaf2f"
     },
     "setup-tdog-skills": {
       "source": "tylerdurrett/skills",
