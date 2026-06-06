@@ -51,6 +51,7 @@ The first build should prove one complete run, not every future adapter:
 - [docs/architecture.md](docs/architecture.md) — canonical system shape and core components.
 - [docs/north-star.md](docs/north-star.md) — vision and direction.
 - [docs/roadmap.md](docs/roadmap.md) — high-level build phases before work becomes issues.
+- [docs/open-questions.md](docs/open-questions.md) — load-bearing decisions deferred past the first slice.
 - [docs/research/README.md](docs/research/README.md) — background research and architecture exploration.
 - [docs/agents/README.md](docs/agents/README.md) — agent workflow system used to develop this repo.
 - [docs/adr/](docs/adr/) — accepted architecture decisions.

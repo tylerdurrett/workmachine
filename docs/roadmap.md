@@ -1,47 +1,82 @@
 # Work Machine Roadmap
 
-Detailed implementation work should live in GitHub issues. This document keeps the repo-level phase map before work is decomposed into specs.
+Repo-level phase map. Decomposed work lives in GitHub issues (the
+initiative is [#1](https://github.com/tylerdurrett/work-machine/issues/1);
+its candidate-features list is the live backlog). This doc keeps the
+sequencing story before work becomes specs.
 
-## Phase 0 — Project setup / docs migration
+Guiding approach: **build up one testable chunk at a time.** Prove the
+basic machinery before the artifact-heavy intricacies; add one workflow
+step at a time before chasing a full pipeline.
 
-- [x] Create repo: `tylerdurrett/work-machine`.
-- [x] Establish repo as canonical engineering docs surface.
-- [x] Create project-facing README, context, charter, architecture, and roadmap docs.
-- [ ] Add basic package skeleton.
-- [ ] Open tracker issues for the first vertical slice.
+## Phase 0 — Project setup / docs migration ✅
 
-## Phase 1 — Tiny tracker-backed run
+- [x] Create repo `tylerdurrett/work-machine`; establish it as canonical
+      engineering-docs surface (ADR-0002).
+- [x] Project-facing README, CONTEXT, charter, architecture, roadmap.
+- [x] Foundational architecture grilled and recorded: ADR-0003
+      (deterministic orchestrator / event-sourced state), ADR-0004
+      (gate-oriented projection), ADR-0005 (YAML + Zod workflows).
+- [x] Publish the initiative spec (#1).
 
-Goal: prove an issue/card tracker surface plus local run state.
+> Stack decided: TypeScript + Node + pnpm, fresh in this repo. The
+> deprecated Python `workflow-engine` is read as a spec, not forked.
 
-- [ ] Define tiny `workflow.yaml` schema.
-- [ ] Create run directory with `run.yaml`, `events.jsonl`, `artifact-index.yaml`, `workflow.snapshot.yaml`.
-- [ ] Create tracker issue/card for a run.
-- [ ] Render run status and allowed commands into issue/card body or comments.
-- [ ] Implement local script executor.
-- [ ] Record artifact path, size, and hash.
-- [ ] Open human gate and parse `/approve` from tracker comments/events.
-- [ ] Complete run and update issue.
+## Phase 1 — First tracker-backed run
 
-## Phase 2 — Agent step and artifact contracts
+The trivial-but-real vertical: one script step + one human gate,
+end-to-end. Built as a few demoable slices:
 
-- [ ] Add `agent` executor adapter.
-- [ ] Support declared consumes/produces artifact contracts.
-- [ ] Add deterministic artifact validation.
-- [ ] Add failure/blocking states.
-- [ ] Add basic reconciliation between issue projection and run state.
+- **Engine core (no tracker):** Zod-validated workflow loader, the pure
+  `decide` fold, the `tick` harness, `events.jsonl` + derived `run.yaml`
+  + `workflow.snapshot.yaml`, and a `script` executor — runnable purely
+  from the CLI.
+- **GitHub projection + intake:** `run create` makes the run *and* the
+  attached issue (single review card for now); render status + artifact
+  links into the card.
+- **Gate round-trip:** open a gate, poll comments on tick, parse
+  `/approve | /request-changes | /reject`, validate (record `actor`),
+  append `gate_decided`, advance, complete.
 
-## Phase 3 — Real workflow package smoke
+Exit: a tiny workflow can be started, tracked, executed, reviewed, and
+completed through GitHub while the event log stays canonical.
 
-- [ ] Create one useful Labs workflow package.
-- [ ] Include one agent step, one script/render step, and one gate.
-- [ ] Keep local filesystem artifact storage first.
-- [ ] Decide whether R2/S3 or Frame.io deserves the next spike.
+## Phase 2 — Agent executor
 
-## Phase 4 — Runtime/substrate evaluation
+- [ ] `agent` executor under "thin skill, thick engine": engine resolves
+      inputs and hands the agent one narrow task; agent never touches
+      lifecycle.
+- [ ] Artifact-contract enforcement (declared `produces` actually
+      produced) and agent failure/retry semantics.
+- [ ] Resolve invocation mechanism (see [open-questions.md](open-questions.md) §1).
 
-Only after the custom coordinator hits real pain, evaluate:
+## Phase 3 — Multi-gate runs and the parent run card
 
-- Temporal for durable coordinator semantics;
-- Hatchet/Inngest/Trigger-style systems for execution/worker routing;
-- Mastra/LangGraph for individual agent-step implementation and evals.
+- [ ] Parent run card + multiple review cards; automatic-step rollups.
+- [ ] Mermaid workflow graph in the run card.
+- [ ] Basic reconciliation between tracker projection and event log.
+
+## Phase 4 — Dynamic fan-out research
+
+- [ ] A researcher that spawns a data-dependent number of sub-tasks and
+      synthesizes them — the static-DAG / pure-`decide` tension (see
+      [open-questions.md](open-questions.md) §2).
+
+## Phase 5 — Content/video pipeline and remote artifacts
+
+- [ ] Build a real pipeline one step at a time (e.g. summarize → brief →
+      …), exercising larger artifacts.
+- [ ] R2/S3 artifact-storage adapter + artifact index for media; decide
+      whether Frame.io earns a review-adapter spike.
+
+## Phase 6 — Shared state, always-on coordinator, runtime evaluation
+
+- [ ] Move the event log to a shared store (Postgres/R2/service) for an
+      always-on coordinator; upgrade `tick` from manual to
+      scheduled/daemon.
+- [ ] Dev-skills tenant adapter: map runs onto the existing
+      `initiative → feature → slice → task` issue hierarchy.
+- [ ] Only after the custom coordinator hits real durability pain,
+      evaluate Temporal (durable semantics) and Hatchet/Inngest-style
+      systems (worker routing). The seams are kept compatible
+      throughout — this is a substrate swap, not a rewrite.
