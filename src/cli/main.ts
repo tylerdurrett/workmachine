@@ -100,7 +100,7 @@ export async function main(
     const workflowPath = positionals[0];
     if (workflowPath === undefined) {
       throw new Error(
-        'usage: work-machine run create <workflowPath> [--input k=v ...] [--run-id <id>]',
+        'usage: workmachine run create <workflowPath> [--input k=v ...] [--run-id <id>]',
       );
     }
     const { runId } = runCreate({
@@ -112,14 +112,14 @@ export async function main(
       rand,
     });
     log(`created run ${runId}`);
-    log(`next: work-machine tick ${runId}`);
+    log(`next: workmachine tick ${runId}`);
     return;
   }
 
   if (command === 'tick') {
     const runId = rest[0];
     if (runId === undefined) {
-      throw new Error('usage: work-machine tick <runId>');
+      throw new Error('usage: workmachine tick <runId>');
     }
     await runTick({ runId, runsRoot, now });
     log(`ticked ${runId}`);
@@ -127,7 +127,7 @@ export async function main(
   }
 
   throw new Error(
-    'usage: work-machine <run create <workflowPath> [--input k=v ...] [--run-id <id>] | tick <runId>>',
+    'usage: workmachine <run create <workflowPath> [--input k=v ...] [--run-id <id>] | tick <runId>>',
   );
 }
 
