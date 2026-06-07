@@ -365,3 +365,197 @@ describe('integration smoke: gated loop (create -> tick -> command -> tick)', ()
     expect(log.read()).toEqual(events);
   });
 });
+
+const feedbackWorkflowPath = resolve(
+  repoRoot,
+  'workflows',
+  'tiny-smoke-feedback',
+  'workflow.yaml',
+);
+const feedbackScriptPath = resolve(
+  repoRoot,
+  'workflows',
+  'tiny-smoke-feedback',
+  'greet.sh',
+);
+const FEEDBACK_RUN_ID = '20260607T120000Z-tiny-smoke-feedback-ab12';
+const REVISION_NOTE = 'say it louder';
+
+/**
+ * The feedback-threading smoke (issue #25): the one test that drives the *real*
+ * CLI against the committed `workflows/tiny-smoke-feedback/` package through the
+ * whole request-changes loop — `create -> tick` (stop at gate) ->
+ * `command request_changes <text>` -> `tick` (re-dispatch the SAME gate's step
+ * with `{{feedback.note}}` resolved into the recorded command, no new gate) ->
+ * `command approve` -> `tick` -> completed.
+ *
+ * The fixture's script step interpolates `{{feedback.note}}`, so the re-run's
+ * resolved command — recorded verbatim on `step_dispatched` — legitimately
+ * differs from the first dispatch once a reviewer has requested changes, and the
+ * artifact the re-run writes carries the reviewer's note. This is the one test
+ * that proves the `{{feedback.*}}` namespace end to end against the real shell
+ * with no mocks.
+ */
+describe('integration smoke: feedback loop (request_changes -> tick -> approve -> tick)', () => {
+  let runsRoot: string;
+  let lines: string[];
+
+  function deps(): Partial<CliDeps> {
+    return {
+      runsRoot,
+      now,
+      rand,
+      mintCommentId: () => 'comment-1',
+      log: (line) => lines.push(line),
+    };
+  }
+
+  function logFor(): JsonlEventLog {
+    return new JsonlEventLog(
+      resolveRunDir(runsRoot, FEEDBACK_RUN_ID).eventsLogPath,
+    );
+  }
+
+  function snapshot() {
+    return loadWorkflowFile(
+      resolveRunDir(runsRoot, FEEDBACK_RUN_ID).workflowSnapshotPath,
+    );
+  }
+
+  /** Create the feedback run, then tick once so greet runs and the gate opens. */
+  async function createAndOpenGate(): Promise<JsonlEventLog> {
+    await main(
+      [
+        'run',
+        'create',
+        feedbackWorkflowPath,
+        '--input',
+        'name=World',
+        '--input',
+        `scriptPath=${feedbackScriptPath}`,
+      ],
+      deps(),
+    );
+    await main(['tick', FEEDBACK_RUN_ID], deps());
+    return logFor();
+  }
+
+  beforeEach(async () => {
+    runsRoot = await mkdtemp(join(tmpdir(), 'wm-smoke-feedback-'));
+    lines = [];
+  });
+
+  afterEach(async () => {
+    await rm(runsRoot, { recursive: true, force: true });
+  });
+
+  it('threads request_changes feedback into the re-dispatched step, then approve completes the run', async () => {
+    const log = await createAndOpenGate();
+
+    // First dispatch: no prior decision, so {{feedback.note}} resolves to empty
+    // and the greeting carries no revision line.
+    const firstDispatch = log.read().find((e) => e.type === 'step_dispatched');
+    expect(firstDispatch?.type).toBe('step_dispatched');
+    if (firstDispatch?.type === 'step_dispatched') {
+      expect(firstDispatch.command).not.toMatch(/\{\{/);
+      expect(firstDispatch.command).toContain(`"${feedbackScriptPath}"`);
+      // The trailing feedback arg is empty on the first round.
+      expect(firstDispatch.command).toMatch(/""\s*$/);
+    }
+
+    // Request changes, then tick: the SAME gate's step re-dispatches with the
+    // feedback resolved in — no new gate id is minted.
+    await main(
+      ['command', FEEDBACK_RUN_ID, 'request_changes', REVISION_NOTE],
+      deps(),
+    );
+    await main(['tick', FEEDBACK_RUN_ID], deps());
+
+    const afterRevision = log.read();
+    expect(afterRevision.map((e) => e.type)).toEqual([
+      'run_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+      'command_received',
+      'gate_decided',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+    ]);
+
+    // The loop reused the one gate (ADR-0004 — one card per gate): every
+    // gate_opened targets the same gate id, and the run is back at that gate.
+    const gateIds = afterRevision
+      .filter((e) => e.type === 'gate_opened')
+      .map((e) => (e.type === 'gate_opened' ? e.gateId : ''));
+    expect(gateIds).toEqual(['review', 'review']);
+    expect(foldRunState(snapshot(), afterRevision).openGate).toEqual({
+      gateId: 'review',
+      stepId: 'review',
+    });
+
+    // The re-dispatched command is fully resolved and records the feedback
+    // verbatim — the determinism guarantee: replay reproduces exact bytes.
+    const dispatches = afterRevision.filter(
+      (e) => e.type === 'step_dispatched',
+    );
+    expect(dispatches).toHaveLength(2);
+    const redispatch = dispatches[1];
+    if (redispatch?.type === 'step_dispatched') {
+      expect(redispatch.command).not.toMatch(/\{\{/);
+      expect(redispatch.command).toContain(`"${REVISION_NOTE}"`);
+      // The re-run's command legitimately differs from the first dispatch.
+      expect(redispatch.command).not.toBe(
+        dispatches[0]?.type === 'step_dispatched'
+          ? dispatches[0].command
+          : undefined,
+      );
+    }
+
+    // The artifact the re-run wrote carries the reviewer's revision line.
+    expect(
+      readFileSync(
+        join(
+          resolveRunDir(runsRoot, FEEDBACK_RUN_ID).runDir,
+          'artifacts/greeting.txt',
+        ),
+        'utf8',
+      ),
+    ).toBe(`${GREETING}Revision: ${REVISION_NOTE}\n`);
+
+    // Approve, then tick: the fresh command binds to the re-opened gate (not the
+    // spent request_changes), so the run folds to completed.
+    await main(['command', FEEDBACK_RUN_ID, 'approve'], deps());
+    await main(['tick', FEEDBACK_RUN_ID], deps());
+
+    const final = log.read();
+    expect(final.map((e) => e.type)).toEqual([
+      'run_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+      'command_received',
+      'gate_decided',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+      'command_received',
+      'gate_decided',
+      'run_completed',
+    ]);
+    const decisions = final
+      .filter((e) => e.type === 'gate_decided')
+      .map((e) => (e.type === 'gate_decided' ? e.decision : ''));
+    expect(decisions).toEqual(['request_changes', 'approve']);
+
+    const state = foldRunState(snapshot(), final);
+    expect(state.status).toBe('completed');
+    expect(state.steps.review?.status).toBe('approved');
+    expect(foldRun(final).status).toBe('completed');
+
+    // Re-ticking a completed run is a no-op.
+    await main(['tick', FEEDBACK_RUN_ID], deps());
+    expect(log.read()).toEqual(final);
+  });
+});

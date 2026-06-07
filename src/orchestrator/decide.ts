@@ -120,9 +120,31 @@ export function decide(
 }
 
 /**
+ * The `seq` of the most recent `gate_decided`, or `-1` when none exists. Commands
+ * at or before this position belong to an already-closed gate round and must not
+ * bind to a re-opened gate.
+ */
+function lastGateDecidedSeq(events: readonly EngineEvent[]): number {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event?.type === 'gate_decided') return event.seq;
+  }
+  return -1;
+}
+
+/**
  * Resolve an open gate: scan `command_received` events in `seq` order and return
  * `decide_gate` for the first one that passes pure validation against the gate's
  * `allowed_decisions` (first-valid-wins). If none is valid yet, `wait`.
+ *
+ * Only commands belonging to the gate's *current* opening are considered: when a
+ * `request_changes` loops a gate and the same gate (one card per gate, ADR-0004)
+ * later re-opens, the command that drove the earlier round is already spent. We
+ * therefore ignore every `command_received` at or before the most recent
+ * `gate_decided` — that decision closed the previous round — so a fresh command
+ * binds to the re-opened gate rather than the stale request_changes replaying
+ * forever. This is purely log-derived (a `seq` position), so the fold stays
+ * deterministic.
  */
 function decideOpenGate(
   workflow: WorkflowDefinition,
@@ -133,9 +155,12 @@ function decideOpenGate(
   const allowed =
     gateStep && isGateStep(gateStep) ? gateStep.allowed_decisions : [];
 
+  const lastDecidedSeq = lastGateDecidedSeq(events);
+
   for (const event of events) {
     if (
       event.type === 'command_received' &&
+      event.seq > lastDecidedSeq &&
       commandValidatesGate(event, openGate, allowed)
     ) {
       return {

@@ -403,6 +403,50 @@ const cases: DecideCase[] = [
     expected: { kind: 'run_step', stepId: 'build' },
   },
   {
+    name: 'a re-opened gate binds to the fresh command, not the spent request_changes',
+    workflow: gated,
+    // After request_changes loops the gate, the command that drove that round is
+    // spent: it sits at/before the `gate_decided` that closed it. When the same
+    // gate re-opens, a new approve must win — otherwise the stale
+    // request_changes (seq 4) would replay forever and the run never settles.
+    events: [
+      created(0),
+      dispatched(1, 'build'),
+      succeeded(2, 'build'),
+      gateOpened(3, 'review'),
+      command(4, 'review', 'request_changes', { feedback: 'v2' }),
+      gateDecided(5, 'review', 'request_changes', { feedback: 'v2' }),
+      dispatched(6, 'build'),
+      succeeded(7, 'build'),
+      gateOpened(8, 'review'),
+      command(9, 'review', 'approve'),
+    ],
+    expected: {
+      kind: 'decide_gate',
+      gateId: 'review',
+      decision: 'approve',
+      actor: 'reviewer',
+    },
+  },
+  {
+    name: 'a re-opened gate still waits when no fresh command has arrived',
+    workflow: gated,
+    // The earlier (spent) request_changes must not re-drive the re-opened gate;
+    // with no new command yet, decide waits.
+    events: [
+      created(0),
+      dispatched(1, 'build'),
+      succeeded(2, 'build'),
+      gateOpened(3, 'review'),
+      command(4, 'review', 'request_changes', { feedback: 'v2' }),
+      gateDecided(5, 'review', 'request_changes', { feedback: 'v2' }),
+      dispatched(6, 'build'),
+      succeeded(7, 'build'),
+      gateOpened(8, 'review'),
+    ],
+    expected: { kind: 'wait' },
+  },
+  {
     name: 'reject is terminal: a rejected run is done',
     workflow: gated,
     events: [
