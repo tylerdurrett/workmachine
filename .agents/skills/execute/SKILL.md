@@ -9,6 +9,20 @@ Ship a task: read the brief, branch off the right base, implement, commit per co
 
 This skill handles every `size:task` spec regardless of parent. Tasks can sit directly under a slice, under a feature with no intervening slice, or be orphans. `/decompose` is the upstream counterpart that produces tasks from a larger spec; the two skills cover disjoint sizes and refuse to run on the wrong size label.
 
+## Running under `/batch`
+
+Solo, this skill's outer agent does the housekeeping (Steps 1–6), spawns **one** implementation sub-agent (Step 7) so the coding runs in a clean context, then reviews and opens the PR (Steps 7-review–9). `/batch` cannot nest that sub-agent — a batch leaf is already a sub-agent. So instead of collapsing everything into one overloaded context, `/batch` **decomposes this skill across three sibling workflow agents**, preserving — and sharpening — the clean-context separation:
+
+| Batch stage | Maps to | Context |
+| --- | --- | --- |
+| **Prep** | Steps 1–6 (validate, walk parent chain, explore, plan, branch) + push the empty branch to origin. Skips the Step 5 approval halt — the batch was approved as a whole. | Heavy bookkeeping; allowed. |
+| **Implement** | Step 7's inner loop only: per sub-section implement → `pnpm typecheck`/`lint:fix`/`format:fix` → `/simplify` → one commit. Pushes commits to origin. | **Clean** — sees only the brief, the plan's sub-sections, the branch, conventions. Exactly Step 7's intent. |
+| **Land** | Step 7-review + Step 8 (verify acceptance criteria first-hand) + Step 9 (open PR), then `/ship` if a batched task depends on this one. | Fresh reviewer. |
+
+State flows through the workflow's structured returns (plan, branch) and through origin (each stage fetches the branch). No leaf ever holds the whole job at once.
+
+Three rules hold across all three stages, overriding any solo behavior: **never halt for human approval** (the batch was approved up front); **never invoke `/triage`** (`/batch` only hands over OPEN + `ready-for-agent` + `size:task` tasks — if a label gap or the Step 4 size escape-hatch is hit anyway, return a `blocker` instead); and **never promote upward** beyond the `/ship` the Land stage is explicitly told to run.
+
 ## Base branch: parent's integration branch (per the integration-branch ADR)
 
 Per [ADR-0001](../../../docs/adr/0001-issues-branch-from-parent-integration-branch.md) (or whatever slot `setup-tdog-skills` placed it in if `0001` was already taken), a spec's working branch is its parent's integration branch, recursing upward through the parent chain, with `main` only as the fallback for orphans (or chains that terminate without a declared integration branch).
@@ -145,7 +159,7 @@ Write a concise plan in chat (no `.plans/` file; task work is ephemeral and inli
 - **Critical files**: the file paths to be modified, with one-line notes.
 - **Verification**: how the change is checked: `pnpm typecheck`, `pnpm lint:fix`, `pnpm format:fix`, `pnpm test`, manual smoke if needed.
 
-Stop and let the user approve, redirect, or ask questions. **Do not branch yet.**
+Stop and let the user approve, redirect, or ask questions. **Do not branch yet.** (Exception: when this is the Prep stage of [a `/batch` run](#running-under-batch), skip this halt and proceed straight to branching — the batch was approved as a whole.)
 
 ## Step 6: Branch
 
@@ -170,6 +184,8 @@ If the branch already exists locally (left over from a prior failed attempt), st
 ## Step 7: Delegate the implementation to a sub-agent
 
 The main (outer) agent does **not** write the code. It has already done the housekeeping — resolved the base branch, synced, explored, planned, branched — and it owns the review and PR steps that follow. The actual coding happens in a single sub-agent (via the `Agent` tool) so the implementation work runs in a clean context, free of the bookkeeping above.
+
+**Under [a `/batch` run](#running-under-batch), this delegation is hoisted into the workflow:** the Prep stage stops after Step 6, and the Implement stage *is* this clean sub-agent, run as a sibling workflow agent rather than nested here. The per-sub-section loop below is exactly what that stage performs.
 
 Spawn one sub-agent for the whole implementation. Hand it everything it needs to work without re-deriving context:
 

@@ -1,0 +1,10 @@
+dist/
+node_modules/
+coverage/
+pnpm-lock.yaml
+
+# Pre-existing docs, ADRs, and vendored skills predate Prettier in this repo;
+# leave their formatting untouched so format runs only cover source we own.
+docs/
+.agents/
+*.md
