@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import {
   JsonlEventLog,
   createRunDir,
@@ -67,6 +67,12 @@ export function runCreate(opts: RunCreateOptions): RunCreateResult {
   if (existsSync(layout.runDir)) {
     throw new Error(`run directory already exists: ${layout.runDir}`);
   }
+
+  // Ensure the `runs/` root exists before createRunDir, which mkdirs the run dir
+  // itself non-recursively (to make a colliding run id an EEXIST). On a fresh
+  // checkout `runs/` is gitignored and absent, so the root is created lazily on
+  // first run; the run dir's uniqueness guard is unaffected.
+  mkdirSync(opts.runsRoot, { recursive: true });
 
   createRunDir(layout, workflow);
 

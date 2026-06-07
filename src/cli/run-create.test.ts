@@ -72,6 +72,23 @@ describe('runCreate', () => {
     }
   });
 
+  it('creates the runs root lazily when it does not yet exist', () => {
+    // On a fresh checkout `runs/` is gitignored and absent; create must make it.
+    const freshRoot = join(runsRoot, 'nested', 'runs');
+    expect(existsSync(freshRoot)).toBe(false);
+
+    const result = runCreate({
+      workflowPath,
+      inputs: {},
+      runId: undefined,
+      runsRoot: freshRoot,
+      now,
+      rand,
+    });
+
+    expect(existsSync(result.runDir)).toBe(true);
+  });
+
   it('refuses a --run-id override whose dir already exists', () => {
     const override = 'fixed-run-id';
     runCreate({
