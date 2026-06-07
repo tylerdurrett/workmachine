@@ -1,13 +1,13 @@
 ---
 name: audit
-description: Multi-agent (Claude in-session + Codex subprocess) version of `/check`. Tier-aware via the input spec's `size:*` label. Synthesises both legs' findings with provenance, classifies them into per-tier writes (per-child body edits, new children for uncovered scope, dated synthesis comment, upstream propagation comments), gates every write on explicit user approval, and on approval lands the writes back to the tracker. Reach for it when the cost of a flawed decomposition is high. Use when the user says "audit the spec", "cross-check this plan", "audit the feature/slice/initiative", or asks for a deeper review than `/check` alone.
+description: Multi-agent (Claude sub-agent + Codex subprocess) version of `/check`. Tier-aware via the input spec's `size:*` label. Synthesises both legs' findings with provenance, classifies them into per-tier writes (per-child body edits, new children for uncovered scope, dated synthesis comment, upstream propagation comments), gates every write on explicit user approval, and on approval lands the writes back to the tracker. Reach for it when the cost of a flawed decomposition is high. Use when the user says "audit the spec", "cross-check this plan", "audit the feature/slice/initiative", or asks for a deeper review than `/check` alone.
 ---
 
 # Audit
 
 Cross-check a tier-bearing spec's decomposition against itself using two heterogeneous reviewers, classify the surviving findings into the per-tier writes that follow from them, gate every write behind explicit user approval, and on approval land the writes — per-child body edits, new children for uncovered scope (feature and initiative tiers), a dated synthesis comment, and (slice and task tiers) sibling or parent propagation comments where the bar is met.
 
-`/check` on its own is single-agent and read-only — fast and useful, but it shares the spec author's blind spots with the reviewer. `/audit` runs `/check` once in this Claude session and once as a Codex subprocess, then this same session synthesises both legs, drops findings that a later open child already addresses, draws a tight bar around what propagates upstream, gates every write behind explicit user approval, and on approval lands the writes.
+`/check` on its own is single-agent and read-only — fast and useful, but it shares the spec author's blind spots with the reviewer. `/audit` runs `/check` twice in parallel — once as a Claude sub-agent and once as a Codex subprocess — then this orchestrating session synthesises both legs, drops findings that a later open child already addresses, draws a tight bar around what propagates upstream, walks the user through the surviving findings one at a time behind an explicit approval gate, and on approval lands the writes.
 
 `/check` is the faster path. Reach for `/audit` when the cost of a flawed decomposition is high enough to justify the second leg — typically right after `/decompose` publishes children, before any `/execute` runs.
 
@@ -39,13 +39,13 @@ The input spec's `size:*` label picks the mode. Each tier's per-child writes, ne
 
 ## Roles and processes
 
-Three roles, two processes:
+Three roles, two delegated check legs:
 
-- **Agent A** — this Claude session. Runs `/check #<N>` in-conversation against the resolved spec. The conversation surfaces findings one at a time (the `/check` style); the run terminates with the standard `## Findings` block.
+- **Orchestrator** — this Claude session (the main agent). Resolves the spec, fetches children, dispatches both check legs in parallel, and — once both have returned — does everything after: synthesis, the one-finding-at-a-time user discussion, the approval gate, and applying the writes. It does **not** run `/check` in its own context; both legs are delegated so the orchestrator stays an impartial synthesiser rather than also being a finding author.
+- **Agent A** — a Claude **sub-agent** (via `Task`) running `/check #<N>` against the resolved spec. It runs `/check` to completion and returns its terminal `## Findings` block verbatim as its final message (the Task result). Delegating Agent A to a sub-agent — rather than running it inline — keeps the orchestrator's later synthesis and user-facing discussion uncoloured by having authored one of the legs.
 - **Agent B** — `codex exec` subprocess running `/check #<N>` against the same spec in parallel. Output captured deterministically via `-o <tmpfile>`. Runs in `--sandbox workspace-write` with `sandbox_workspace_write.network_access=true` because `/check` needs the network (`gh issue view`, `gh issue list`) and reads from the workspace; the skill's own contract is what prevents writes, not the sandbox. `read-only` is the wrong fit — it blocks network and `gh` cannot reach `api.github.com`, so the leg falls through with "missing-issue".
-- **Synthesiser** — this same Claude session, after both legs finish. Reads Agent B's captured output, parses both legs' `## Findings` blocks, merges and dedupes by substance, drops items one leg convincingly refutes, runs the forward-scope check (skipping it cleanly when the tier has no later open siblings to defer to), classifies each surviving finding into a per-tier action, applies the backward-propagation bar (slice and task tiers only), and produces the unified write set with provenance per finding (`claude` / `codex` / `both`).
 
-Sub-tasks within the synthesiser (forward-scope checks, codebase grounding when a finding needs a re-read, clustering uncovered scope into draft new children) use `Task(subagent_type="Explore")`. No extra `claude -p` nesting needed — only Agent B is an outside subprocess.
+Both check legs run outside the orchestrator's context — one a Claude sub-agent, one a Codex subprocess — so the orchestrator reads both `## Findings` blocks fresh and synthesises them symmetrically. Sub-tasks within synthesis (forward-scope checks, codebase grounding when a finding needs a re-read, clustering uncovered scope into draft new children) use `Task(subagent_type="Explore")`.
 
 ## Process
 
@@ -82,7 +82,7 @@ Soft skip: if the body lacks `## Out of Scope` (or `## Out of scope`, case varie
 
 ### 2. Fetch children once, up front
 
-All modes except a parentless task fetch children (or, for task mode, the task's siblings via its parent) once, up front. The synthesiser uses this in-session for forward-scope checks, drafting per-child body edits, clustering uncovered scope, and re-run dedupe via the audit-origin marker.
+All modes except a parentless task fetch children (or, for task mode, the task's siblings via its parent) once, up front. The orchestrator uses this for forward-scope checks, drafting per-child body edits, clustering uncovered scope, and re-run dedupe via the audit-origin marker.
 
 **Initiative / feature / slice modes.** Fetch the input spec's children:
 
@@ -106,14 +106,20 @@ gh issue list --search "parent-issue:<owner>/<repo>#<P>" \
 
 ### 3. Launch both legs in parallel
 
-**Agent A (in-session).** Invoke `/check #<N>` in this same session against the resolved spec. Let it run conversationally — surface findings one at a time, talk them through, end with the terminal `## Findings` block. Capture the block text from the final message for the synthesis step.
+Dispatch both check legs so they run concurrently — Agent B as a **backgrounded** Bash call, Agent A as a `Task` sub-agent launched right after — then wait for both to return before synthesising. They take roughly the same wall-clock time, so launching them serially doubles the audit cost for no gain. The orchestrator runs neither `/check` itself.
 
-**Agent B (Codex subprocess).** Run via Bash:
+**Agent A (Claude sub-agent).** Dispatch a `Task` sub-agent (a general-purpose Claude agent with full tools) and have it run `/check #<N>` to completion, returning the terminal `## Findings` block verbatim as its final message. A prompt of the shape:
+
+> Run the `/check` skill against issue `#<N>` in this repo. Let it run its full read-only analysis, then return its terminal `## Findings` block **verbatim** as your entire final message — the `## Findings` heading and every bullet (or the `_No issues surfaced._` sentinel), and nothing else.
+
+The Task result IS Agent A's output — the orchestrator reads the `## Findings` block straight from it in Step 4. Do not run `/check` in the orchestrator's own context; the whole point of delegating is to keep the synthesising session impartial.
+
+**Agent B (Codex subprocess).** Run via Bash, backgrounded so it runs alongside the Agent A sub-agent:
 
 ```bash
 RUN_ID=$(date +%Y%m%d-%H%M%S)-$$
 CODEX_OUT=$(mktemp -t "audit-codex-${RUN_ID}.XXXXXX")
-codex exec \
+GH_TOKEN="$(gh auth token)" codex exec \
   --sandbox workspace-write \
   -c 'sandbox_workspace_write.network_access=true' \
   --ephemeral \
@@ -126,16 +132,17 @@ codex exec \
 Notes on the invocation:
 
 - `--sandbox workspace-write -c 'sandbox_workspace_write.network_access=true'` because `/check` needs network access (`gh issue view`, `gh issue list`) — the previous `--sandbox read-only` blocked network and the Codex leg silently fell through with `error connecting to api.github.com`. `workspace-write` allows network and writes inside the workspace; the skill's read-only contract is what stops writes, not the sandbox.
+- `GH_TOKEN="$(gh auth token)"` is prepended so `gh` authenticates **inside** the Codex sandbox. When the operator's token lives in the macOS keychain (the `gh auth login` default — `gh auth status` shows `(keyring)` and `~/.config/gh/hosts.yml` has no `oauth_token:` field), the sandbox can't reach the keychain and `gh` fails with `HTTP 401: Requires authentication`. Resolving the token in the unsandboxed parent shell and passing it as an env var sidesteps the keychain: `gh` prefers `GH_TOKEN`/`GITHUB_TOKEN` over the keyring, and env vars pass through the sandbox. The token is never written to disk — it lives only in the child process's environment for the life of the one-shot. If `gh auth token` itself fails in the parent shell, the operator isn't logged in at all; fall through to single-leg per the Codex-failure mode.
 - `--ephemeral` because this is a one-shot — no need to persist a Codex session.
 - `-o <file>` writes Agent B's final message (which carries the `## Findings` block) to a file the synthesiser can read deterministically. This is the analog of `claude -p --output-format json`'s `result` field — same idea, different CLI.
 - `-C "$(pwd)"` ensures Codex runs at the repo root so its `.agents/skills/` lookup resolves `/check`. Skip only if the parent is already at the root.
 - The trailing positional prompt is a single shell-quoted string with the issue reference — `'/check #<N>'`. The slash-command resolves inside Codex via the same `.agents/skills/` lookup Claude uses, and `/check` itself does the tier dispatch from labels, so this skill never has to special-case the mode at the Codex boundary.
 
-Run the two legs concurrently — kick off the Codex Bash call, then proceed with the in-session `/check` while Codex runs. They take roughly the same wall-clock time, so launching them serially doubles the audit cost for no gain.
+Kick off the backgrounded Codex Bash call first, then dispatch the Agent A `Task` in the same turn so both legs run concurrently. When the Agent A Task returns, read the backgrounded Codex output (Step 4). Do not block on Codex before dispatching Agent A — that serialises the two legs and doubles the audit cost for no gain.
 
 ### 4. Parse both legs' findings
 
-Agent A's terminal `## Findings` block is in this session's recent messages — read it directly.
+Agent A's terminal `## Findings` block is the Task sub-agent's returned result — read it directly from the Task output.
 
 Agent B's terminal `## Findings` block is at the bottom of `$CODEX_OUT` — read the file, locate the last `## Findings` heading, and parse the bullets that follow.
 
@@ -264,7 +271,7 @@ Comment body shape, posted on the audited spec:
 ```markdown
 ## Audit synthesis (<YYYY-MM-DD>)
 
-Audited via `/audit`. Legs: Claude (in-session), Codex (subprocess).
+Audited via `/audit`. Legs: Claude (sub-agent), Codex (subprocess).
 
 - [<severity>] (<provenance>) [<classification>] <claim>. <ref> [<ref> ...]
 - [<severity>] (<provenance>) [<classification>] <claim>. <ref>
@@ -278,20 +285,29 @@ If there were zero surviving findings (clean bill), the comment still posts on a
 
 ### 9. Approval gate
 
-Before any write — per-child body edits, new child creation, the synthesis comment, or upstream propagation comments — present the full set of proposed changes to the user, grouped by destination:
+Nothing is written until the user approves — no body edit, no new issue, no comment, even for nit-level findings. Walk the user through the results **one finding at a time** (the way `/check` surfaces findings conversationally), then confirm the spec-level writes. Do not dump the whole write set as a single wall and ask one yes/no — the per-finding walk is what lets the user keep some findings and drop others, and is the load-bearing difference between this gate and a blanket "apply everything?".
 
-- The unified findings list, with provenance, classification, and any forward-scope drops noted.
-- **Per-child body edits.** For each affected child (or the audited task in task mode): the issue number and title, plus the full text of the `## Audit findings (<YYYY-MM-DD>)` section that will be inserted. Mark any child being skipped due to irregular body shape so the user sees the skip up front.
-- **New children to create** (initiative and feature modes only). For each draft: the proposed title, the full body that will be sent to `gh issue create`, the labels (`size:<child-tier>` + `needs-triage`), and a one-line note on which uncovered-scope finding(s) it bundles.
-- **Synthesis comment** (initiative / feature / slice modes only). The audited spec's issue number and the full body of the `## Audit synthesis (<YYYY-MM-DD>)` comment that will be posted (or appended to today's existing audit comment, see Step 10a).
-- **Upstream propagation comments** (slice and task modes only). Target issue number and full comment body for each.
+#### 9a. Findings, one at a time
 
-The user can:
+For each surviving finding, in the order it was surfaced:
 
-- **Approve all** — apply every proposed write.
-- **Approve a subset** — apply / post only the items the user explicitly accepts. Drop the rest.
-- **Edit before applying** — let the user rewrite a finding's wording, a draft child body, a per-child callout, a comment body; then apply the edited version.
-- **Reject** — exit cleanly with no writes anywhere.
+- **Explain it in plain English** — *what's going on*, *why it matters* (the concrete failure it would cause an executing or decomposing agent downstream), and the *proposed write* it maps to (which child body gets the `## Audit findings` bullet, or which upstream comment it drafts).
+- **State its provenance plainly** — `both` legs agreed, or it's `claude`-only / `codex`-only. When one leg is silent, say so and say that silence is **not** refutation. This is what makes the cross-check legible to the user.
+- **Gate that finding individually.** Ask whether to record/apply it. Accept record-it / skip-it / edit-the-wording, and carry the decision forward into the write set.
+
+Use `AskUserQuestion` (one finding per question, with the explanation in the surrounding message) or a plain conversational ask — whichever fits — but gate each finding on its own so the user can take some and drop others. A clean bill (zero findings) skips 9a entirely; the synthesis comment in 9b is still offered.
+
+#### 9b. Spec-level writes
+
+After the per-finding pass, confirm the writes that aren't tied to a single finding, reflecting only the findings the user kept in 9a:
+
+- **Synthesis comment** (initiative / feature / slice modes). Show the full body that will be posted (or appended to today's existing audit comment, see Step 10a). Include only kept findings as live bullets, with a one-line footnote noting any finding reviewed-and-dropped so the audit record stays honest about what the cross-check covered. Ask whether to post it.
+- **New children to create** (initiative and feature modes only). For each draft: the proposed title, the full body that will be sent to `gh issue create`, the labels (`size:<child-tier>` + `needs-triage`), and a one-line note on which uncovered-scope finding(s) it bundles. Gate each draft.
+- **Upstream propagation comments** (slice and task modes only). Target issue number and full comment body for each. Gate each.
+
+Mark any child being skipped due to irregular body shape so the user sees the skip up front.
+
+Throughout 9a and 9b the user can: approve an item, skip it, edit its wording before applying, or reject the whole run (exit cleanly, no writes anywhere). Apply only what the user explicitly accepts.
 
 Do not write anything until the user approves. The skill is unusable without this gate — its whole point is producing reviewer-grade audit output, not autonomously editing the tracker.
 
@@ -399,9 +415,9 @@ Pick the next-step skill from the lifecycle loop:
 
 ## Failure modes
 
-- **Codex errors / times out / can't authenticate.** Continue with single-agent (Agent A only) findings. The synthesis comment's preamble paragraph notes that the cross-check leg fell through, and every finding is provenance-tagged `claude` only. Do not halt on Codex failure — the in-session leg's output is still useful.
+- **Codex errors / times out / can't authenticate.** Continue with single-agent (Agent A only) findings. The synthesis comment's preamble paragraph notes that the cross-check leg fell through, and every finding is provenance-tagged `claude` only. Do not halt on Codex failure — the Agent A sub-agent's output is still useful.
 - **Codex's `## Findings` block is missing or malformed.** Same handling as Codex error — flag the leg as unparsable, treat it as if the cross-check fell through, continue with the other leg's findings. Surface the raw tail of `$CODEX_OUT` so the user can see what Codex produced.
-- **Agent A's `## Findings` block is missing or malformed.** Should not happen since this Claude session controls Agent A directly — if it does, abort and surface the bug; do not silently fall through to Codex-only output (the symmetry would mask a regression in `/check`).
+- **Agent A's `## Findings` block is missing or malformed.** The Task sub-agent returned something other than a clean `## Findings` block (conversational text, a truncated result, an error). Re-dispatch the Agent A Task once with a sharper instruction to return only the verbatim block. If it still comes back malformed, abort and surface the bug; do not silently fall through to Codex-only output (the symmetry would mask a regression in `/check`). Agent A is the in-house leg — a persistent malformation signals a regression worth stopping on, unlike a Codex leg that merely fell through.
 - **A child's body is irregularly shaped (no recognised insertion target).** Surface the issue and skip writes to that child. Continue with the remaining writes.
 - **`gh issue create` fails on an approved new child.** Surface the error, skip that draft, continue with the rest. Note the skipped draft in the final summary so the user can manually retry.
 - **`gh issue comment` (or PATCH on an existing same-dated comment) fails on the synthesis comment.** Surface the error and continue to the per-child edits and upstream comments. The per-child writes still cover the executing agents.
@@ -410,7 +426,7 @@ Pick the next-step skill from the lifecycle loop:
 - **Sub-issue attach fails on a created new child.** Log the single-line attach-failed message and continue. The child issue is already created; the parent linkage can be repaired by hand.
 - **User rejects the approval gate.** Exit cleanly with no writes. The `$CODEX_OUT` tmpfile is cleaned up.
 
-Every failure is loud (surfaced to the user) and non-fatal (the rest of the audit's writes still happen). The single exception is malformed Agent A output, which aborts because it indicates a regression in the inner skill.
+Every failure is loud (surfaced to the user) and non-fatal (the rest of the audit's writes still happen). The single exception is malformed Agent A output that persists after one re-dispatch, which aborts because it indicates a regression in the inner skill.
 
 ## Cleanup
 
@@ -432,6 +448,7 @@ If the skill aborts mid-run, the file remains in `${TMPDIR:-/tmp}/` for forensic
 - **Re-runs are idempotent on new-child creation.** The `**Surfaced by:** /audit run on <tier> #<N>` marker is the canonical dedupe key against existing native sub-issues of `<N>`. Re-running on the same spec produces only new children that don't already exist; existing audit-origin children are skipped.
 - **Re-runs append to today's synthesis comment.** Same-day re-runs append new bullets to today's existing dated comment rather than creating a second same-dated comment.
 - **Codex sandbox is `workspace-write` with `sandbox_workspace_write.network_access=true`.** `/check` needs network for `gh issue view` / `gh issue list`. `read-only` blocks network in Codex and the leg falls through with `error connecting to api.github.com`; that's what the skill exists to catch via its single failure mode, not the desired steady state. The skill's read-only contract is what prevents writes, not the sandbox.
+- **The Codex leg gets `gh` auth via `GH_TOKEN="$(gh auth token)"`, never the keychain.** A keychain-stored token (the `gh auth login` default on macOS) is unreachable inside the sandbox and the leg falls through with `HTTP 401: Requires authentication`. Resolve the token in the unsandboxed parent shell and pass it as an env var; never write it to disk or hardcode it.
 - **`/check` remains independently invocable.** This skill orchestrates `/check`; it does not replace it. The single-agent path is faster and remains the default for cheap dry-runs.
 
 ## What this skill does NOT do
