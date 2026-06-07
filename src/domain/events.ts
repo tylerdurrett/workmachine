@@ -148,6 +148,12 @@ export interface CommandReceivedEvent extends EventEnvelope {
   actor: string;
   /** The decision verb the command carries. */
   decision: GateDecision;
+  /**
+   * Free-text revision feedback the reviewer attached, meaningful only when
+   * `decision` is `request_changes`. `decide` threads it onto the resulting
+   * `decide_gate` so the harness records it on `gate_decided`.
+   */
+  feedback?: string;
 }
 
 /**
