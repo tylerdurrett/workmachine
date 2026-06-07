@@ -46,6 +46,9 @@ desktop.ini
 *.swo
 *~
 
+# Run instances (event logs + artifacts are local and gitignored; see CONTEXT.md)
+runs/
+
 # Misc
 tmp/
 temp/
