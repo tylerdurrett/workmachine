@@ -42,5 +42,22 @@ Unresolved:
   never implemented.)
 - **Convergence:** how a synthesis step waits on a set whose size is only
   known at runtime, while `decide` stays a pure fold.
+- **Step instances vs definitions:** fan-out introduces runtime step
+  *instances* (e.g. `slide[3]`) distinct from static step *definitions*,
+  with composite ids and a readiness rule of "all spawned siblings
+  complete." Nested fan-out (N items × K variants → `slide[3].variant[2]`)
+  is the same mechanism applied twice.
+- **Variants and the selection gate:** generating K options per item
+  ("4 options each, pick the best later") needs a gate flavor beyond
+  approve/reject — a **selection gate** where the review card shows the K
+  candidates and the human picks one inline. The chosen variant becomes
+  the canonical artifact (others kept as alternates or discarded); this is
+  a generalization of the produce→approve→promote flow to
+  produce-set→select→promote. Custom gate `decisions` already allow this
+  shape (cf. the prototype's `choose_remotion` branch decision).
+- **Operational, not architectural, hard parts:** N×K agent runs explode
+  cost/concurrency (worker routing, rate limits, dollars) and clutter the
+  projection (run card needs rollup/grouping). Per-instance events isolate
+  partial failure cleanly. None of this touches the orchestrator's purity.
 - **Temporal mapping:** this is exactly where Temporal child workflows /
   parallel activities would later fit; keep the seam compatible.
