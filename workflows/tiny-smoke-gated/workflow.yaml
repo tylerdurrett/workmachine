@@ -1,0 +1,30 @@
+slug: tiny-smoke-gated
+name: Tiny Smoke (Gated)
+description: >-
+  The engine's committed gated example. One script step writes a single small
+  artifact, then a review gate waits for a reviewer decision — exercising the
+  create -> tick (stop at gate) -> command -> tick (advance) loop end to end.
+inputs:
+  name:
+    type: string
+    description: Who to greet; substituted into the greeting text.
+  scriptPath:
+    type: string
+    description: >-
+      Absolute path to the committed greet.sh. The step locates its script via
+      this input because the resolver has no {{workflow.dir}} token.
+steps:
+  - id: greet
+    type: script
+    run: 'sh "{{inputs.scriptPath}}" "{{inputs.name}}" "{{artifacts.greeting.path}}"'
+    produces:
+      - id: greeting
+        path: artifacts/greeting.txt
+  - id: review
+    type: gate
+    needs:
+      - greet
+    allowed_decisions:
+      - approve
+      - request_changes
+      - reject

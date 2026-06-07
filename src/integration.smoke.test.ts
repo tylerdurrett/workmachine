@@ -7,7 +7,9 @@ import { parse as parseYaml } from 'yaml';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CliDeps } from './cli/index.js';
 import { main } from './cli/index.js';
+import { foldRunState } from './orchestrator/index.js';
 import { JsonlEventLog, foldRun, resolveRunDir } from './run/index.js';
+import { loadWorkflowFile } from './workflow/index.js';
 
 /**
  * The slice's integration smoke (issue #13): the one test that drives the *real*
@@ -151,5 +153,215 @@ describe('integration smoke: gateless spine (create -> tick -> completed)', () =
       }),
     );
     expect(foldRun(events).status).toBe('completed');
+  });
+});
+
+const gatedWorkflowPath = resolve(
+  repoRoot,
+  'workflows',
+  'tiny-smoke-gated',
+  'workflow.yaml',
+);
+const gatedScriptPath = resolve(
+  repoRoot,
+  'workflows',
+  'tiny-smoke-gated',
+  'greet.sh',
+);
+const GATED_RUN_ID = '20260607T120000Z-tiny-smoke-gated-ab12';
+
+/**
+ * The gated companion to the gateless smoke: it drives the *real* CLI against
+ * the committed `workflows/tiny-smoke-gated/` package through the whole manual
+ * gate loop. The pure gate core (#23) and the impure half (this task) only earn
+ * their keep when the committed fixture, the harness, and the command CLI move a
+ * run end to end — `create -> tick` (stop at the gate) -> `command <decision>`
+ * -> `tick` (advance) — so this is the one test that exercises that spine with
+ * the real shell and no mocks.
+ *
+ * Reviewer identity is recorded, not enforced, this slice; feedback tokens are
+ * out of scope (`{{feedback.*}}` lands later), so the fixture carries none.
+ */
+describe('integration smoke: gated loop (create -> tick -> command -> tick)', () => {
+  let runsRoot: string;
+  let lines: string[];
+
+  function deps(): Partial<CliDeps> {
+    return {
+      runsRoot,
+      now,
+      rand,
+      mintCommentId: () => 'comment-1',
+      log: (line) => lines.push(line),
+    };
+  }
+
+  /** The run's event log handle. */
+  function logFor(): JsonlEventLog {
+    return new JsonlEventLog(
+      resolveRunDir(runsRoot, GATED_RUN_ID).eventsLogPath,
+    );
+  }
+
+  /** Create the gated run against the committed package. */
+  async function create(): Promise<void> {
+    await main(
+      [
+        'run',
+        'create',
+        gatedWorkflowPath,
+        '--input',
+        'name=World',
+        '--input',
+        `scriptPath=${gatedScriptPath}`,
+      ],
+      deps(),
+    );
+  }
+
+  /** Create the gated run, then tick once so it runs greet and opens the gate. */
+  async function createAndOpenGate(): Promise<JsonlEventLog> {
+    await create();
+    await main(['tick', GATED_RUN_ID], deps());
+    return logFor();
+  }
+
+  /** The pinned snapshot, for gate-aware fold assertions on the run state. */
+  function snapshot() {
+    return loadWorkflowFile(
+      resolveRunDir(runsRoot, GATED_RUN_ID).workflowSnapshotPath,
+    );
+  }
+
+  beforeEach(async () => {
+    runsRoot = await mkdtemp(join(tmpdir(), 'wm-smoke-gated-'));
+    lines = [];
+  });
+
+  afterEach(async () => {
+    await rm(runsRoot, { recursive: true, force: true });
+  });
+
+  it('stops at gate_opened after the first tick, with nothing dispatched downstream', async () => {
+    const log = await createAndOpenGate();
+    const events = log.read();
+
+    // The script step ran, the gate opened, and the run stopped waiting — no
+    // terminal run event, no decision, because no command has arrived yet.
+    expect(events.map((e) => e.type)).toEqual([
+      'run_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+    ]);
+    const state = foldRunState(snapshot(), events);
+    expect(state.openGate).toEqual({ gateId: 'review', stepId: 'review' });
+    expect(state.status).toBe('running');
+    // The artifact the script wrote is on disk before any review.
+    expect(
+      readFileSync(
+        join(
+          resolveRunDir(runsRoot, GATED_RUN_ID).runDir,
+          'artifacts/greeting.txt',
+        ),
+        'utf8',
+      ),
+    ).toBe(GREETING);
+  });
+
+  it('approve -> tick reaches run_completed', async () => {
+    const log = await createAndOpenGate();
+    await main(['command', GATED_RUN_ID, 'approve'], deps());
+    await main(['tick', GATED_RUN_ID], deps());
+
+    const events = log.read();
+    expect(events.map((e) => e.type)).toEqual([
+      'run_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+      'command_received',
+      'gate_decided',
+      'run_completed',
+    ]);
+    const decided = events.find((e) => e.type === 'gate_decided');
+    expect(decided?.type).toBe('gate_decided');
+    if (decided?.type === 'gate_decided') {
+      expect(decided.decision).toBe('approve');
+    }
+    const state = foldRunState(snapshot(), events);
+    expect(state.status).toBe('completed');
+    expect(state.steps.review?.status).toBe('approved');
+
+    // Re-ticking a completed gated run is a no-op.
+    await main(['tick', GATED_RUN_ID], deps());
+    expect(log.read()).toEqual(events);
+  });
+
+  it('reject -> tick reaches run_failed / rejected', async () => {
+    const log = await createAndOpenGate();
+    await main(['command', GATED_RUN_ID, 'reject', 'not good enough'], deps());
+    await main(['tick', GATED_RUN_ID], deps());
+
+    const events = log.read();
+    expect(events.map((e) => e.type)).toEqual([
+      'run_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+      'command_received',
+      'gate_decided',
+      'run_failed',
+    ]);
+    const failed = events.at(-1);
+    expect(failed?.type).toBe('run_failed');
+    if (failed?.type === 'run_failed') {
+      expect(failed.reason).toMatch(/reject/i);
+    }
+    // The terminal `run_failed` folds the run status to `failed`; the rejected
+    // verdict is preserved on the gate step itself (and on its recorded
+    // decision), so reject is observable end to end.
+    const state = foldRunState(snapshot(), events);
+    expect(state.status).toBe('failed');
+    expect(state.steps.review?.status).toBe('rejected');
+    expect(state.steps.review?.decision).toBe('reject');
+
+    // Re-ticking a rejected run appends nothing more.
+    await main(['tick', GATED_RUN_ID], deps());
+    expect(log.read()).toEqual(events);
+  });
+
+  it('records a closed-gate command but does not advance the run', async () => {
+    // Issue a command BEFORE any tick, while no gate is open: the CLI stamps an
+    // empty gate id, so the command is recorded as an audit fact but can never
+    // match the gate that opens later — decide leaves it audit-only.
+    await create();
+    await main(['command', GATED_RUN_ID, 'approve'], deps());
+
+    const log = logFor();
+    const closed = log.read().at(-1);
+    expect(closed?.type).toBe('command_received');
+    if (closed?.type === 'command_received') {
+      expect(closed.gateId).toBe('');
+    }
+
+    // Tick: greet runs and the gate opens, but the stale command (empty gate
+    // id) does not match it, so no gate_decided is appended and the run stops at
+    // the open gate rather than advancing.
+    await main(['tick', GATED_RUN_ID], deps());
+    const events = log.read();
+    const types = events.map((e) => e.type);
+    expect(types).toContain('gate_opened');
+    expect(types).not.toContain('gate_decided');
+    expect(types).not.toContain('run_completed');
+    expect(types).not.toContain('run_failed');
+
+    const state = foldRunState(snapshot(), events);
+    expect(state.openGate).toEqual({ gateId: 'review', stepId: 'review' });
+    expect(state.status).toBe('running');
+
+    // Re-ticking does not advance either: still waiting on a valid command.
+    await main(['tick', GATED_RUN_ID], deps());
+    expect(log.read()).toEqual(events);
   });
 });

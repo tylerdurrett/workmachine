@@ -1,8 +1,10 @@
 #!/usr/bin/env node
-import { randomInt } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import type { GateDecision } from '../domain/index.js';
+import { runCommand } from './command.js';
 import { runCreate } from './run-create.js';
 import { runTick } from './tick.js';
 
@@ -19,10 +21,22 @@ import { runTick } from './tick.js';
  * Commands:
  *  - `run create <workflowPath> [--input k=v ...] [--run-id <id>]`
  *  - `tick <runId>`
+ *  - `command <runId> <decision> [text]`
  */
 
 /** The 4-char run-id suffix alphabet (lowercase + digits). */
 const RAND_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
+
+/** The decision verbs the `command` flow accepts, mirroring `GateDecision`. */
+const GATE_DECISIONS: readonly GateDecision[] = [
+  'approve',
+  'request_changes',
+  'reject',
+];
+
+/** Usage line for the `command` flow, shared by its arg checks. */
+const COMMAND_USAGE =
+  'usage: workmachine command <runId> <approve|request_changes|reject> [text]';
 
 /** The impure collaborators the CLI needs; all default to production behavior. */
 export interface CliDeps {
@@ -32,6 +46,12 @@ export interface CliDeps {
   now: () => string;
   /** Randomness for the minted run-id suffix. Defaults to crypto-backed. */
   rand: () => string;
+  /**
+   * Mint the synthetic comment id a manual command carries — its canonical
+   * idempotency key (ADR-0006). Defaults to a crypto UUID; tests inject a fixed
+   * minter so the appended `command_received` is fully determined.
+   */
+  mintCommentId: () => string;
   /** Output sink. Defaults to `console.log`. */
   log: (line: string) => void;
 }
@@ -51,12 +71,24 @@ function resolveDeps(deps?: Partial<CliDeps>): CliDeps {
     runsRoot: deps?.runsRoot ?? join(process.cwd(), 'runs'),
     now: deps?.now ?? (() => new Date().toISOString()),
     rand: deps?.rand ?? defaultRand,
+    mintCommentId: deps?.mintCommentId ?? (() => randomUUID()),
     log:
       deps?.log ??
       ((line) => {
         console.log(line);
       }),
   };
+}
+
+/** Narrow a raw argv token to a {@link GateDecision}, or throw a usage error. */
+function parseDecision(raw: string | undefined): GateDecision {
+  if (
+    raw !== undefined &&
+    (GATE_DECISIONS as readonly string[]).includes(raw)
+  ) {
+    return raw as GateDecision;
+  }
+  throw new Error(COMMAND_USAGE);
 }
 
 /** Parse `--input k=v` pairs into a record, splitting on the first `=`. */
@@ -85,7 +117,7 @@ export async function main(
   argv: string[],
   deps?: Partial<CliDeps>,
 ): Promise<void> {
-  const { runsRoot, now, rand, log } = resolveDeps(deps);
+  const { runsRoot, now, rand, mintCommentId, log } = resolveDeps(deps);
   const [command, ...rest] = argv;
 
   if (command === 'run' && rest[0] === 'create') {
@@ -126,8 +158,27 @@ export async function main(
     return;
   }
 
+  if (command === 'command') {
+    const [runId, decisionArg, feedback] = rest;
+    if (runId === undefined) {
+      throw new Error(COMMAND_USAGE);
+    }
+    const decision = parseDecision(decisionArg);
+    runCommand({
+      runId,
+      decision,
+      ...(feedback !== undefined && { feedback }),
+      runsRoot,
+      mintCommentId,
+      now,
+    });
+    log(`recorded ${decision} command on run ${runId}`);
+    log(`next: workmachine tick ${runId}`);
+    return;
+  }
+
   throw new Error(
-    'usage: workmachine <run create <workflowPath> [--input k=v ...] [--run-id <id>] | tick <runId>>',
+    'usage: workmachine <run create <workflowPath> [--input k=v ...] [--run-id <id>] | tick <runId> | command <runId> <approve|request_changes|reject> [text]>',
   );
 }
 

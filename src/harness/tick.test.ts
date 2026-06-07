@@ -187,6 +187,158 @@ steps:
     expect(afterSecond).toEqual(afterFirst);
   });
 
+  /**
+   * A script step that writes an artifact, followed by a `gate` review step that
+   * `needs` it — the minimal shape that exercises the gate branches.
+   */
+  const GATED_WORKFLOW = `
+slug: tiny-smoke
+steps:
+  - id: greet
+    type: script
+    run: 'printf hi > {{artifacts.out.path}}'
+    produces:
+      - id: out
+        path: artifacts/out.txt
+  - id: review
+    type: gate
+    needs: [greet]
+    allowed_decisions: [approve, request_changes, reject]
+`;
+
+  /** A `command_received` audit fact at the given seq. */
+  function command(
+    seq: number,
+    fields: {
+      gateId: string;
+      commentId: string;
+      decision: 'approve' | 'request_changes' | 'reject';
+      actor?: string;
+      feedback?: string;
+    },
+  ): EngineEvent {
+    return {
+      type: 'command_received',
+      runId,
+      seq,
+      ts: now(),
+      gateId: fields.gateId,
+      commentId: fields.commentId,
+      actor: fields.actor ?? 'reviewer',
+      decision: fields.decision,
+      ...(fields.feedback !== undefined && { feedback: fields.feedback }),
+    };
+  }
+
+  it('runs the script step then stops at gate_opened, dispatching nothing downstream', async () => {
+    const workflow = loadWorkflow(GATED_WORKFLOW);
+    const { log, runDir } = seedRun(workflow, [created()]);
+
+    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+
+    const events = log.read();
+    // The run dispatches the script step, then opens the gate and waits — no
+    // terminal run event, because the gate is genuinely awaiting a command.
+    expect(events.map((e) => e.type)).toEqual([
+      'run_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+    ]);
+    const opened = events.at(-1);
+    expect(opened?.type).toBe('gate_opened');
+    if (opened?.type === 'gate_opened') {
+      expect(opened.gateId).toBe('review');
+      expect(opened.stepId).toBe('review');
+    }
+  });
+
+  it('folds an approve command through to run_completed', async () => {
+    const workflow = loadWorkflow(GATED_WORKFLOW);
+    const { log, runDir } = seedRun(workflow, [created()]);
+
+    // First tick: run the step and open the gate.
+    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    // A reviewer approves the open gate.
+    log.append(
+      command(log.read().length, {
+        gateId: 'review',
+        commentId: 'c1',
+        decision: 'approve',
+      }),
+    );
+    // Second tick: validate the command, decide the gate, finalize.
+    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+
+    const events = log.read();
+    expect(events.map((e) => e.type)).toEqual([
+      'run_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+      'command_received',
+      'gate_decided',
+      'run_completed',
+    ]);
+    const decided = events.find((e) => e.type === 'gate_decided');
+    expect(decided?.type).toBe('gate_decided');
+    if (decided?.type === 'gate_decided') {
+      expect(decided.decision).toBe('approve');
+      expect(decided.actor).toBe('reviewer');
+    }
+  });
+
+  it('folds a reject command through to run_failed', async () => {
+    const workflow = loadWorkflow(GATED_WORKFLOW);
+    const { log, runDir } = seedRun(workflow, [created()]);
+
+    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    log.append(
+      command(log.read().length, {
+        gateId: 'review',
+        commentId: 'c1',
+        decision: 'reject',
+      }),
+    );
+    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+
+    const events = log.read();
+    expect(events.map((e) => e.type)).toEqual([
+      'run_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+      'command_received',
+      'gate_decided',
+      'run_failed',
+    ]);
+    const failed = events.at(-1);
+    expect(failed?.type).toBe('run_failed');
+    if (failed?.type === 'run_failed') {
+      expect(failed.reason).toMatch(/reject/i);
+    }
+  });
+
+  it('is idempotent when re-ticked after a gate decision finalizes the run', async () => {
+    const workflow = loadWorkflow(GATED_WORKFLOW);
+    const { log, runDir } = seedRun(workflow, [created()]);
+
+    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    log.append(
+      command(log.read().length, {
+        gateId: 'review',
+        commentId: 'c1',
+        decision: 'approve',
+      }),
+    );
+    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    const afterDecision = log.read();
+
+    // Re-ticking a finalized gated run sees `done` and appends nothing more.
+    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    expect(log.read()).toEqual(afterDecision);
+  });
+
   it('re-dispatches a step left dangling by a crash mid-step, then completes', async () => {
     const workflow = loadWorkflow(`
 slug: tiny-smoke
