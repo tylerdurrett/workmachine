@@ -177,6 +177,72 @@ steps:
     ).toThrow(/cannot resolve \{\{inputs\.msg\}\}/);
   });
 
+  /** A `gate_decided` event closing a gate with the given decision/feedback. */
+  function gateDecided(
+    seq: number,
+    decision: 'approve' | 'request_changes' | 'reject',
+    feedback?: string,
+  ): EngineEvent {
+    return {
+      type: 'gate_decided',
+      runId,
+      seq,
+      ts: '2026-06-07T12:00:00.000Z',
+      gateId: 'review',
+      decision,
+      actor: 'reviewer',
+      ...(feedback !== undefined && { feedback }),
+    };
+  }
+
+  const feedbackWorkflow = (): WorkflowDefinition =>
+    loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: revise
+    type: script
+    run: "printf '{{feedback.note}}'"
+`);
+
+  it('substitutes {{feedback.<field>}} from the latest request_changes decision', () => {
+    const workflow = feedbackWorkflow();
+    const command = resolveCommand(workflow, stepOf(workflow), [
+      created(),
+      gateDecided(1, 'request_changes', 'tighten the intro'),
+    ]);
+    expect(command).toBe("printf 'tighten the intro'");
+  });
+
+  it('resolves {{feedback.<field>}} to an empty default on the first dispatch', () => {
+    // No prior gate_decided: the loop has not run yet, so feedback is empty
+    // rather than throwing — the same templated command stays dispatchable.
+    const workflow = feedbackWorkflow();
+    const command = resolveCommand(workflow, stepOf(workflow), [created()]);
+    expect(command).toBe("printf ''");
+  });
+
+  it('uses the latest request_changes feedback across multiple revision rounds', () => {
+    const workflow = feedbackWorkflow();
+    const command = resolveCommand(workflow, stepOf(workflow), [
+      created(),
+      gateDecided(1, 'request_changes', 'first round'),
+      gateDecided(2, 'request_changes', 'second round'),
+    ]);
+    expect(command).toBe("printf 'second round'");
+  });
+
+  it('ignores non-request_changes decisions when reading feedback', () => {
+    // An approve carries no revision feedback; the latest request_changes wins
+    // even when a later approve closes a subsequent gate.
+    const workflow = feedbackWorkflow();
+    const command = resolveCommand(workflow, stepOf(workflow), [
+      created(),
+      gateDecided(1, 'request_changes', 'please revise'),
+      gateDecided(2, 'approve'),
+    ]);
+    expect(command).toBe("printf 'please revise'");
+  });
+
   it('reads inputs only from the run_created event in the log', () => {
     const workflow = loadWorkflow(`
 slug: tiny-smoke

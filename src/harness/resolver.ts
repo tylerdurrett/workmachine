@@ -2,6 +2,7 @@ import type { EngineEvent } from '../domain/index.js';
 import type { ScriptStep, WorkflowDefinition } from '../workflow/index.js';
 import {
   ARTIFACT_REF_RE,
+  FEEDBACK_REF_RE,
   INPUT_REF_RE,
   isScriptStep,
   TOKEN_RE,
@@ -23,14 +24,19 @@ import {
  *
  * The substitution grammar mirrors the loader's static validation exactly
  * (`interpolation.ts`) by importing its regexes, so the check and the
- * substitution share one source of truth and cannot drift. Two namespaces are
- * supported in this gateless slice:
+ * substitution share one source of truth and cannot drift. Three namespaces are
+ * supported:
  *  - `{{inputs.<name>}}` → the run's input value, stringified.
  *  - `{{artifacts.<id>.path}}` → the declared path of that produced artifact.
+ *  - `{{feedback.<field>}}` → the revision feedback from the latest
+ *    `gate_decided(request_changes)`, so a step re-dispatched by the
+ *    request-changes loop runs with the reviewer's note threaded in. On the
+ *    first dispatch (no prior decision) it resolves to an empty default rather
+ *    than throwing, so the same templated command is dispatchable both before
+ *    and after a revision round.
  *
- * `{{feedback.*}}` (gate feedback) is out of scope for slice 1. The dispatch
- * table below is structured so a new namespace drops in as one more entry
- * without touching the substitution loop.
+ * The dispatch table below is structured so a new namespace drops in as one more
+ * entry without touching the substitution loop.
  */
 
 /** Resolve a single token's inner text to its value, or `undefined` if unhandled. */
@@ -48,6 +54,29 @@ function readInputs(events: readonly EngineEvent[]): Record<string, unknown> {
     }
   }
   return {};
+}
+
+/**
+ * Read the revision feedback the request-changes loop threads into a re-run.
+ *
+ * Scans the log back-to-front for the latest `gate_decided` whose decision is
+ * `request_changes` and returns its `feedback` text. Latest-wins so that across
+ * several revision rounds the step re-runs with the most recent reviewer note.
+ * Returns `''` when no such decision exists yet — the first dispatch precedes
+ * any gate, so `{{feedback.*}}` resolves to an empty default rather than
+ * throwing, keeping the same templated command dispatchable on every round.
+ */
+function readFeedback(events: readonly EngineEvent[]): string {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (
+      event?.type === 'gate_decided' &&
+      event.decision === 'request_changes'
+    ) {
+      return event.feedback ?? '';
+    }
+  }
+  return '';
 }
 
 /**
@@ -75,7 +104,8 @@ function artifactPaths(workflow: WorkflowDefinition): Map<string, string> {
  *
  * @param workflow the run's validated workflow definition (its snapshot).
  * @param step the script step whose templated command is being resolved.
- * @param events the run's event log, read for the run's inputs.
+ * @param events the run's event log, read for the run's inputs and the latest
+ *   request-changes feedback.
  * @returns the fully-resolved command, with no `{{...}}` tokens remaining.
  * @throws if a token references a binding absent from inputs/artifacts.
  */
@@ -86,9 +116,10 @@ export function resolveCommand(
 ): string {
   const inputs = readInputs(events);
   const paths = artifactPaths(workflow);
+  const feedback = readFeedback(events);
 
-  // Each resolver handles one namespace; a new namespace (e.g. `feedback`)
-  // drops in as one more entry without touching the substitution loop below.
+  // Each resolver handles one namespace; a new namespace drops in as one more
+  // entry without touching the substitution loop below.
   const resolvers: TokenResolver[] = [
     (inner) => {
       const match = INPUT_REF_RE.exec(inner);
@@ -112,6 +143,13 @@ export function resolveCommand(
         );
       }
       return path;
+    },
+    (inner) => {
+      // `{{feedback.<field>}}` is the latest request-changes note; the field is
+      // the template author's label for that one free-text string. Empty default
+      // on the first dispatch — never throws — so the loop can re-run the step.
+      if (!FEEDBACK_REF_RE.test(inner)) return undefined;
+      return feedback;
     },
   ];
 
