@@ -67,6 +67,12 @@
       "skillPath": "skills/productivity/handoff/SKILL.md",
       "computedHash": "1a78d774f8a59db5daa6e65e20a6596872fa8cde769f9a6e3a09b678dd5ae8cc"
     },
+    "humanize": {
+      "source": "tylerdurrett/skills",
+      "sourceType": "github",
+      "skillPath": "skills/humanize/SKILL.md",
+      "computedHash": "538371002b5fde6bed0f59a3c0584a5821da29b95b5c88d361fc5d827cbd31af"
+    },
     "improve-codebase-architecture": {
       "source": "tylerdurrett/skills",
       "sourceType": "github",
