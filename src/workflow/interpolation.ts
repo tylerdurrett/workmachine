@@ -19,10 +19,20 @@ import type { WorkflowDefinition } from './schema.js';
  * offending location for clear errors.
  */
 
-/** Matches a `{{ ... }}` token and captures its (untrimmed) inner text. */
-const TOKEN_RE = /\{\{\s*([^}]*?)\s*\}\}/g;
-const INPUT_REF_RE = /^inputs\.([A-Za-z0-9_-]+)$/;
-const ARTIFACT_REF_RE = /^artifacts\.([A-Za-z0-9_-]+)\.path$/;
+/**
+ * Matches a `{{ ... }}` token and captures its (untrimmed) inner text.
+ *
+ * Exported so the resolver (#11) substitutes against the *exact same* grammar
+ * this loader pass validates against — sharing the source of truth keeps the
+ * static check and the runtime substitution from drifting apart. The regex is
+ * `g`-flagged, so any consumer using it with `.exec`/`.test` must reset
+ * `lastIndex` or use `.matchAll`; here every use is via `.matchAll`.
+ */
+export const TOKEN_RE = /\{\{\s*([^}]*?)\s*\}\}/g;
+/** Matches the inner text of an `{{inputs.<name>}}` token, capturing `<name>`. */
+export const INPUT_REF_RE = /^inputs\.([A-Za-z0-9_-]+)$/;
+/** Matches the inner text of an `{{artifacts.<id>.path}}` token, capturing `<id>`. */
+export const ARTIFACT_REF_RE = /^artifacts\.([A-Za-z0-9_-]+)\.path$/;
 
 /**
  * Validate every interpolation reference in `def` against its declarations.
