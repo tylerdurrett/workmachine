@@ -1,3 +1,4 @@
+export * from './cli/index.js';
 export * from './domain/index.js';
 export * from './executor/index.js';
 export * from './harness/index.js';
