@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { foldRunState } from '../orchestrator/index.js';
 import { JsonlEventLog, resolveRunDir } from '../run/index.js';
+import { FakeTracker } from '../tracker/index.js';
 import { loadWorkflowFile } from '../workflow/index.js';
 import type { CliDeps } from './main.js';
 import { main } from './main.js';
@@ -19,6 +20,7 @@ import { main } from './main.js';
 const now = (): string => '2026-06-07T12:00:00.000Z';
 const rand = (): string => 'ab12';
 const RUN_ID = '20260607T120000Z-tiny-smoke-ab12';
+const SANDBOX_REPO = 'acme/widgets';
 
 const WORKFLOW_YAML = `
 slug: tiny-smoke
@@ -45,6 +47,7 @@ describe('main (CLI dispatch)', () => {
       now,
       rand,
       mintCommentId: () => 'comment-1',
+      makeTracker: () => new FakeTracker(),
       log: (line) => lines.push(line),
     };
   }
@@ -54,9 +57,11 @@ describe('main (CLI dispatch)', () => {
     workflowPath = join(runsRoot, 'workflow.yaml');
     writeFileSync(workflowPath, WORKFLOW_YAML, 'utf8');
     lines = [];
+    process.env.WORKMACHINE_SANDBOX_REPO = SANDBOX_REPO;
   });
 
   afterEach(async () => {
+    delete process.env.WORKMACHINE_SANDBOX_REPO;
     await rm(runsRoot, { recursive: true, force: true });
   });
 
@@ -72,6 +77,7 @@ describe('main (CLI dispatch)', () => {
     const events = new JsonlEventLog(layout.eventsLogPath).read();
     expect(events.map((e) => e.type)).toEqual([
       'run_created',
+      'card_created',
       'step_dispatched',
       'step_succeeded',
       'run_completed',
@@ -81,6 +87,30 @@ describe('main (CLI dispatch)', () => {
     if (created?.type === 'run_created') {
       expect(created.inputs).toEqual({ msg: 'hi' });
     }
+  });
+
+  it('opens the card via --repo and records card_created with that repo', async () => {
+    const tracker = new FakeTracker();
+    await main(['run', 'create', workflowPath, '--repo', 'acme/override'], {
+      ...deps(),
+      makeTracker: () => tracker,
+    });
+
+    const events = new JsonlEventLog(
+      resolveRunDir(runsRoot, RUN_ID).eventsLogPath,
+    ).read();
+    const carded = events.find((e) => e.type === 'card_created');
+    expect(carded?.type).toBe('card_created');
+    if (carded?.type === 'card_created') {
+      // The operator's --repo wins over the WORKMACHINE_SANDBOX_REPO fallback.
+      expect(carded.repo).toBe('acme/override');
+      expect(carded.runIdMarker).toBe(RUN_ID);
+    }
+
+    // The fake recorded the card with the workmachine label and run-id body.
+    const card = tracker.cardState('card-1');
+    expect(card?.labels).toEqual(['workmachine']);
+    expect(card?.body).toContain(RUN_ID);
   });
 
   it('refuses a --run-id collision', async () => {
@@ -93,6 +123,13 @@ describe('main (CLI dispatch)', () => {
 
   it('throws on an unknown command', async () => {
     await expect(main(['bogus'], deps())).rejects.toThrow(/usage/);
+  });
+
+  it('refuses run create when no repo is given and no env fallback is set', async () => {
+    delete process.env.WORKMACHINE_SANDBOX_REPO;
+    await expect(main(['run', 'create', workflowPath], deps())).rejects.toThrow(
+      /no target repo/,
+    );
   });
 
   it('rejects a command with a disallowed decision verb', async () => {
@@ -121,13 +158,18 @@ describe('main command dispatch (manual gate command)', () => {
   let runsRoot: string;
   let workflowPath: string;
   let lines: string[];
+  let tracker: FakeTracker;
 
+  // One tracker shared across `run create` and `tick` invocations, mirroring
+  // production where both hit the same repo: `create` opens the card and `tick`
+  // re-renders into it (the review-card projection on gate_opened, ADR-0004).
   function deps(): Partial<CliDeps> {
     return {
       runsRoot,
       now,
       rand,
       mintCommentId: () => 'comment-1',
+      makeTracker: () => tracker,
       log: (line) => lines.push(line),
     };
   }
@@ -137,9 +179,12 @@ describe('main command dispatch (manual gate command)', () => {
     workflowPath = join(runsRoot, 'workflow.yaml');
     writeFileSync(workflowPath, GATED_WORKFLOW_YAML, 'utf8');
     lines = [];
+    tracker = new FakeTracker();
+    process.env.WORKMACHINE_SANDBOX_REPO = SANDBOX_REPO;
   });
 
   afterEach(async () => {
+    delete process.env.WORKMACHINE_SANDBOX_REPO;
     await rm(runsRoot, { recursive: true, force: true });
   });
 

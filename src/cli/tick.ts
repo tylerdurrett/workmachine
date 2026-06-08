@@ -1,8 +1,20 @@
 import { existsSync } from 'node:fs';
 import { scriptExecutor } from '../executor/index.js';
 import { tick } from '../harness/index.js';
-import { JsonlEventLog, resolveRunDir, writeRunCache } from '../run/index.js';
-import { loadWorkflowFile } from '../workflow/index.js';
+import { foldRunState } from '../orchestrator/index.js';
+import {
+  JsonlEventLog,
+  readCursorSidecar,
+  resolveRunDir,
+  writeCursorSidecar,
+  writeRunCache,
+} from '../run/index.js';
+import {
+  GitHubTracker,
+  resolveGitHubConfig,
+  type TrackerAdapter,
+} from '../tracker/index.js';
+import { isGateStep, loadWorkflowFile } from '../workflow/index.js';
 
 /**
  * The `tick` flow: advance an existing run by one harness pass.
@@ -13,6 +25,20 @@ import { loadWorkflowFile } from '../workflow/index.js';
  * source package changed), and hands the harness the real `scriptExecutor`. The
  * harness reads the run id back from the log's `run_created` event — never from
  * here — keeping that identity single-sourced (CONTEXT.md → Run / run id scheme).
+ *
+ * It also builds the live tracker the harness renders the review card onto when a
+ * gate opens (ADR-0004). The run is self-describing: the target repo is read from
+ * the folded `RunState.card.repo` (recorded on `card_created`), never re-supplied
+ * here, so a tick projects onto the exact card the run was created with. The
+ * tracker is built only for a run that can render a review card — one with a gate
+ * step and an opened card — so a gateless run never constructs a tracker it would
+ * never use, and the harness skips the projection silently when none is passed.
+ *
+ * It also owns the comment-polling cursor sidecar (ADR-0006): it hands the harness
+ * a reader/writer for the run's `.cursor.json`, keyed on the card id, so the poll
+ * skips comments it has already seen. The cursor is strictly a fetch optimization —
+ * the harness dedups ingestion on the comment id already in the log — so a lost or
+ * corrupt sidecar only costs a redundant read, never a double-ingested comment.
  *
  * Idempotency is inherited from the harness: ticking a completed run reads the
  * log, decides `done`, and returns without appending. We refresh the derived
@@ -30,12 +56,30 @@ export interface RunTickOptions {
   runsRoot: string;
   /** Optional clock injection forwarded to the harness (tests pass a fixed one). */
   now?: () => string;
+  /**
+   * Build the tracker the run's review card is rendered onto, given the
+   * `owner/name` repo the run recorded on `card_created`. Injected so a tick is
+   * testable offline (a {@link FakeTracker}); defaults to a live
+   * {@link GitHubTracker} resolved from the environment.
+   */
+  makeTracker?: (repo: string) => TrackerAdapter;
+}
+
+/**
+ * Build the live tracker for a resolved repo: a {@link GitHubTracker} over the
+ * config resolved from `process.env` plus the run's recorded repo (ADR-0008 —
+ * the engine hard-codes no tracker repo). Mirrors `run-create`/`main`'s wiring so
+ * a created card and the card a later tick re-renders address the same repo.
+ */
+function defaultMakeTracker(repo: string): TrackerAdapter {
+  return new GitHubTracker(resolveGitHubConfig(process.env, { repo }));
 }
 
 /**
  * Advance a run via the harness, then refresh its derived cache.
  *
- * @param opts the run id, runs root, and optional injected clock.
+ * @param opts the run id, runs root, optional injected clock, and optional
+ *   tracker factory.
  * @throws if no run directory exists for `runId`.
  */
 export async function runTick(opts: RunTickOptions): Promise<void> {
@@ -47,12 +91,33 @@ export async function runTick(opts: RunTickOptions): Promise<void> {
   const workflow = loadWorkflowFile(layout.workflowSnapshotPath);
   const log = new JsonlEventLog(layout.eventsLogPath);
 
+  // Resolve the tracker from the run's recorded card: the run is self-describing,
+  // so the repo comes from the folded state, not from the caller. Built only when
+  // the run can actually render a review card — it has a gate step AND an opened
+  // card — so a gateless run never constructs a (live) tracker it would never use,
+  // and the harness skips the projection silently when no tracker is passed.
+  const makeTracker = opts.makeTracker ?? defaultMakeTracker;
+  const repo = foldRunState(workflow, log.read()).card?.repo;
+  const hasGate = workflow.steps.some(isGateStep);
+  const tracker = hasGate && repo !== undefined ? makeTracker(repo) : undefined;
+
   await tick({
     workflow,
     log,
     executor: scriptExecutor,
     runDir: layout.runDir,
     ...(opts.now ? { now: opts.now } : {}),
+    ...(tracker
+      ? {
+          tracker,
+          // The cursor sidecar lives in the run dir, which only the CLI resolves;
+          // thread it to the harness as card-id-keyed callbacks so the harness
+          // stays layout-free. Read/write are non-canonical (ADR-0006).
+          readCursor: (cardId: string) => readCursorSidecar(layout, cardId),
+          writeCursor: (cardId, cursor) =>
+            writeCursorSidecar(layout, cardId, cursor),
+        }
+      : {}),
   });
 
   writeRunCache(layout.runCachePath, log.read());

@@ -6,6 +6,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { EngineEvent } from '../domain/index.js';
 import { scriptExecutor } from '../executor/index.js';
 import { JsonlEventLog, createRunDir, resolveRunDir } from '../run/index.js';
+import {
+  BOT_ACTOR,
+  type CommandCursor,
+  FakeTracker,
+} from '../tracker/index.js';
 import { loadWorkflow } from '../workflow/index.js';
 import type { WorkflowDefinition } from '../workflow/index.js';
 import { tick } from './tick.js';
@@ -206,6 +211,24 @@ steps:
     allowed_decisions: [approve, request_changes, reject]
 `;
 
+  /** A `card_created` fact at the given seq, naming the run's tracker card. */
+  function cardCreated(
+    seq: number,
+    card: { id: string; url: string },
+    repo = 'acme/widgets',
+  ): EngineEvent {
+    return {
+      type: 'card_created',
+      runId,
+      seq,
+      ts: now(),
+      cardId: card.id,
+      cardUrl: card.url,
+      runIdMarker: runId,
+      repo,
+    };
+  }
+
   /** A `command_received` audit fact at the given seq. */
   function command(
     seq: number,
@@ -375,5 +398,391 @@ steps:
       'run_completed',
     ]);
     expect(readFileSync(join(runDir, 'artifacts/out.txt'), 'utf8')).toBe('hi');
+  });
+
+  describe('review-card projection on gate_opened', () => {
+    /**
+     * Seed a gated run whose card already exists on the tracker, returning the
+     * tracker, the card ref, and the run's log/dir. The `card_created` fact names
+     * the same card the tracker minted, so the harness re-renders into it.
+     */
+    async function seedCardedRun(): Promise<{
+      tracker: FakeTracker;
+      cardId: string;
+      log: JsonlEventLog;
+      runDir: string;
+    }> {
+      const workflow = loadWorkflow(GATED_WORKFLOW);
+      const tracker = new FakeTracker();
+      const card = await tracker.createRunCard({ title: 'Run', body: 'seed' });
+      const { log, runDir } = seedRun(workflow, [
+        created(),
+        cardCreated(1, card),
+      ]);
+      return { tracker, cardId: card.id, log, runDir };
+    }
+
+    const workflow = loadWorkflow(GATED_WORKFLOW);
+
+    it('renders the review card into the run card on gate_opened', async () => {
+      const { tracker, cardId, log, runDir } = await seedCardedRun();
+
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+      });
+
+      const stored = tracker.cardState(cardId);
+      // The single review card was rendered once, into the run's existing card.
+      expect(stored?.renderCount).toBe(1);
+      expect(stored?.body).toContain('### Artifacts');
+      expect(stored?.body).toContain('artifacts/out.txt');
+      expect(stored?.body).toMatch(/sha256 `[0-9a-f]{64}`/);
+      expect(stored?.body).toContain('### Allowed decisions');
+      expect(stored?.body).toContain('`approve`');
+      expect(stored?.body).toContain('`request_changes`');
+    });
+
+    it('renders into the run-recorded card ref, never minting a new card', async () => {
+      const { tracker, cardId, log, runDir } = await seedCardedRun();
+
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+      });
+
+      // The harness rendered into the card the run recorded on `card_created`
+      // (`card-1`), not a freshly minted one — the seam reuses the CardRef.
+      expect(cardId).toBe('card-1');
+      expect(tracker.cardState('card-2')).toBeUndefined();
+      expect(tracker.cardState(cardId)?.renderCount).toBe(1);
+    });
+
+    it('re-renders the SAME card with the revision thread after a request_changes loop', async () => {
+      const { tracker, cardId, log, runDir } = await seedCardedRun();
+
+      // First tick: run the work, open the gate, render the card.
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+      });
+      const renderCountAfterOpen = tracker.cardState(cardId)?.renderCount;
+
+      // A reviewer requests changes with feedback. The fold loops the work and
+      // the gate back to pending and records the feedback on the gate's resting
+      // state; the next tick re-runs the work and re-opens the SAME gate.
+      log.append(
+        command(log.read().length, {
+          gateId: 'review',
+          commentId: 'c1',
+          decision: 'request_changes',
+          feedback: 'please tighten the copy',
+        }),
+      );
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+      });
+
+      const stored = tracker.cardState(cardId);
+      // Same card, rendered again (not a new one), now carrying the revision.
+      expect(tracker.cardState('card-2')).toBeUndefined();
+      expect(stored?.renderCount).toBeGreaterThan(renderCountAfterOpen ?? 0);
+      expect(stored?.body).toContain('### Revision requested');
+      expect(stored?.body).toContain('please tighten the copy');
+    });
+
+    it('opens the gate but renders nothing when the run has no card', async () => {
+      // No `card_created` fact: a script-only style run with a gate but no card.
+      const { log, runDir } = seedRun(workflow, [created()]);
+      const tracker = new FakeTracker();
+
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+      });
+
+      // The gate still opened — the projection is a silent no-op without a card.
+      expect(log.read().map((e) => e.type)).toContain('gate_opened');
+    });
+  });
+
+  describe('command ingestion off the tracker card (ADR-0006)', () => {
+    /**
+     * An in-memory cursor store standing in for the `.cursor.json` sidecar, with
+     * a `lose()` to simulate a crashed/corrupt cursor — so a crash-and-replay test
+     * can re-poll from the beginning and assert dedup still holds off the log.
+     */
+    function cursorStore(): {
+      readCursor: (cardId: string) => CommandCursor | undefined;
+      writeCursor: (cardId: string, cursor: CommandCursor) => void;
+      lose: () => void;
+    } {
+      let store = new Map<string, CommandCursor>();
+      return {
+        readCursor: (cardId) => store.get(cardId),
+        writeCursor: (cardId, cursor) => {
+          store.set(cardId, cursor);
+        },
+        lose: () => {
+          store = new Map();
+        },
+      };
+    }
+
+    /**
+     * Seed a gated run whose card already exists on the tracker, run the first
+     * tick to open the gate, and return everything a test needs to seed a reviewer
+     * comment and re-tick. Mirrors the projection block's `seedCardedRun`, plus the
+     * cursor store the harness polls through.
+     */
+    async function openGatedRun(): Promise<{
+      tracker: FakeTracker;
+      card: { id: string; url: string };
+      log: JsonlEventLog;
+      runDir: string;
+      cursor: ReturnType<typeof cursorStore>;
+    }> {
+      const workflow = loadWorkflow(GATED_WORKFLOW);
+      const tracker = new FakeTracker();
+      const card = await tracker.createRunCard({ title: 'Run', body: 'seed' });
+      const { log, runDir } = seedRun(workflow, [
+        created(),
+        cardCreated(1, card),
+      ]);
+      const cursor = cursorStore();
+      // First tick: run the script step and open the gate (no comments yet).
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+        ...cursor,
+      });
+      return { tracker, card, log, runDir, cursor };
+    }
+
+    const workflow = loadWorkflow(GATED_WORKFLOW);
+
+    it('appends one command_received per new comment and drives /approve to run_completed', async () => {
+      const { tracker, card, log, runDir, cursor } = await openGatedRun();
+      await tracker.seedComment(card, '/approve', 'reviewer');
+
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+        ...cursor,
+      });
+
+      const events = log.read();
+      expect(events.map((e) => e.type)).toEqual([
+        'run_created',
+        'card_created',
+        'step_dispatched',
+        'step_succeeded',
+        'gate_opened',
+        'command_received',
+        'gate_decided',
+        'run_completed',
+      ]);
+      const received = events.find((e) => e.type === 'command_received');
+      expect(received?.type).toBe('command_received');
+      if (received?.type === 'command_received') {
+        expect(received.commentId).toBe('c1');
+        expect(received.actor).toBe('reviewer');
+        expect(received.decision).toBe('approve');
+        // Stamped with the run's open gate id, mirroring the manual CLI path.
+        expect(received.gateId).toBe('review');
+      }
+    });
+
+    it('loops the guarded work back to pending on /request-changes, threading feedback', async () => {
+      const { tracker, card, log, runDir, cursor } = await openGatedRun();
+      await tracker.seedComment(
+        card,
+        '/request-changes tighten the copy',
+        'reviewer',
+      );
+
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+        ...cursor,
+      });
+
+      const events = log.read();
+      const received = events.find((e) => e.type === 'command_received');
+      expect(received?.type).toBe('command_received');
+      if (received?.type === 'command_received') {
+        expect(received.decision).toBe('request_changes');
+        expect(received.feedback).toBe('tighten the copy');
+      }
+      // The gate looped: the work re-ran and the SAME gate re-opened (ADR-0004),
+      // so the run is awaiting review again rather than terminal.
+      const decided = events.find((e) => e.type === 'gate_decided');
+      expect(decided?.type).toBe('gate_decided');
+      expect(events.filter((e) => e.type === 'gate_opened')).toHaveLength(2);
+      expect(events.some((e) => e.type === 'run_completed')).toBe(false);
+      expect(events.some((e) => e.type === 'run_failed')).toBe(false);
+    });
+
+    it('drives /reject through to run_failed', async () => {
+      const { tracker, card, log, runDir, cursor } = await openGatedRun();
+      await tracker.seedComment(card, '/reject not shippable', 'reviewer');
+
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+        ...cursor,
+      });
+
+      const events = log.read();
+      expect(events.at(-1)?.type).toBe('run_failed');
+      const received = events.find((e) => e.type === 'command_received');
+      if (received?.type === 'command_received') {
+        expect(received.decision).toBe('reject');
+        expect(received.feedback).toBe('not shippable');
+      }
+    });
+
+    it('never ingests the same comment id twice, even when the cursor is lost (crash-and-replay)', async () => {
+      const { tracker, card, log, runDir, cursor } = await openGatedRun();
+      await tracker.seedComment(card, '/approve', 'reviewer');
+
+      // First poll ingests the comment and advances the cursor.
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+        ...cursor,
+      });
+      const afterFirst = log.read();
+      expect(
+        afterFirst.filter((e) => e.type === 'command_received'),
+      ).toHaveLength(1);
+
+      // Simulate a crash that lost the cursor sidecar, then re-tick: the poll
+      // re-reads the comment from the beginning, but dedup off the log keeps it
+      // from being ingested a second time (ADR-0006).
+      cursor.lose();
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+        ...cursor,
+      });
+
+      const received = log.read().filter((e) => e.type === 'command_received');
+      expect(received).toHaveLength(1);
+      expect(received[0]?.type).toBe('command_received');
+      if (received[0]?.type === 'command_received') {
+        expect(received[0].commentId).toBe('c1');
+      }
+    });
+
+    it('keeps a second valid command audit-only once the gate has closed (first-valid-wins)', async () => {
+      const { tracker, card, log, runDir, cursor } = await openGatedRun();
+      await tracker.seedComment(card, '/approve', 'reviewer');
+
+      // First approve closes the gate and completes the run.
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+        ...cursor,
+      });
+
+      // A later reviewer leaves a second valid command on the now-closed gate.
+      await tracker.seedComment(card, '/reject too late', 'reviewer');
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+        ...cursor,
+      });
+
+      const events = log.read();
+      // The second command is still recorded as an audit fact (two
+      // `command_received`)...
+      expect(events.filter((e) => e.type === 'command_received')).toHaveLength(
+        2,
+      );
+      // ...but it targets a closed gate, so `decide` names no second decision: the
+      // run stays completed (exactly one `gate_decided`, no second one and no
+      // `run_failed`), the late `/reject` is the trailing audit-only fact.
+      expect(events.filter((e) => e.type === 'gate_decided')).toHaveLength(1);
+      expect(events.some((e) => e.type === 'run_completed')).toBe(true);
+      expect(events.some((e) => e.type === 'run_failed')).toBe(false);
+    });
+
+    it('never re-ingests the engine’s own bot-authored comments (AC6)', async () => {
+      const { tracker, card, log, runDir, cursor } = await openGatedRun();
+      // The engine posts a note containing a slash verb, authored as the bot.
+      await tracker.postComment(card, '/approve (this is the gate prompt)');
+      // Sanity: the bot comment is stamped with the shared bot actor.
+      expect(BOT_ACTOR).toBe('workmachine');
+
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+        ...cursor,
+      });
+
+      const events = log.read();
+      // No command was ingested from the bot's own comment, and the gate stays
+      // open and undecided.
+      expect(events.some((e) => e.type === 'command_received')).toBe(false);
+      expect(events.some((e) => e.type === 'gate_decided')).toBe(false);
+    });
   });
 });

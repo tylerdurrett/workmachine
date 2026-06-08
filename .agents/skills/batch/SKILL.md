@@ -7,9 +7,11 @@ description: Batch-execute the ready `size:task` sub-issues under a parent issue
 
 Run `/execute` across the ready `size:task` children of one parent issue, as a single background [workflow](workflow.js). The orchestration — which tasks may run, in what order — is decided here, by the calling agent, and handed to the workflow as a dependency DAG.
 
-Each task runs as a **3-stage pipeline of sibling worktree-isolated agents** — Prep → Implement → Land — which hoists `/execute`'s Step-7 delegation up into the workflow (see the execute skill's "Running under /batch"). This matters: the Implement agent gets a **clean context** (just the brief, the plan's sub-sections, the branch), exactly as a solo `/execute` keeps its implementation sub-agent clean — it is never asked to juggle base-branch resolution and parent-chain walks *and* write the code. State flows Prep→Implement→Land through structured returns plus origin (each stage fetches the branch); the per-task worktrees keep parallel tasks from colliding.
+Each task runs as a **4-stage pipeline of sibling worktree-isolated agents** — Prep → Implement → Review → Land — which hoists `/execute`'s Step-7 delegation up into the workflow (see the execute skill's "Running under /batch"). This matters: the Implement agent gets a **clean context** (just the brief, the plan's sub-sections, the branch), exactly as a solo `/execute` keeps its implementation sub-agent clean — it is never asked to juggle base-branch resolution and parent-chain walks *and* write the code. State flows Prep→Implement→Review→Land through structured returns plus origin (each stage fetches the branch); the per-task worktrees keep parallel tasks from colliding.
 
-This skill **merges code**, not just opens PRs. To unblock a dependent task, its predecessor is squash-merged into the integration branch via `/ship` (task tier) — without an individual human review. That is a deliberate escalation over a bare `/execute`. Independent tasks (no batched dependents) only ever get an open PR, fully reviewable as normal. The aggregate review gate stays at slice/feature promotion (`/ship size:slice`). Make this loud in the end-of-run output; never let an auto-merge be a surprise.
+The **Review stage** is an independent `/code-review high` pass run by a *different* agent than the implementer (a real second pair of eyes on correctness, not just the Land agent's on-contract/AC check). It auto-fixes blocking findings with one bounded fix-and-recount pass, then **gates the auto-ship**: a predecessor whose review leaves surviving blocking findings is *not* merged.
+
+This skill **merges code**, not just opens PRs. To unblock a dependent task, its predecessor is squash-merged into the integration branch via `/ship` (task tier) — without an individual human review, **but only when its independent code-review came back clean**. A predecessor held back by blocking findings stays an open PR (findings posted as a comment), and the scheduler then **cascade-skips its dependents** rather than stacking them on suspect code. That auto-merge is a deliberate escalation over a bare `/execute`. Independent tasks (no batched dependents) only ever get an open PR, fully reviewable as normal. The aggregate review gate stays at slice/feature promotion (`/ship size:slice`). Make this loud in the end-of-run output; never let an auto-merge be a surprise.
 
 ## Hard rules
 
@@ -60,7 +62,7 @@ The result is a list: `[{ number, title, dependsOn: [numbers] }, ...]`, acyclic.
 Show the user, concisely:
 
 - The eligible tasks and the inferred DAG, grouped so the parallelism is visible (e.g. "Wave 1 (parallel): #3, #5 · Wave 2: #4 after #3").
-- **Which tasks will be auto-shipped** (those with ≥1 batched dependent) and the one-line consequence: "these squash-merge into `<integration-branch>` without individual review to unblock their dependents."
+- **Which tasks will be auto-shipped** (those with ≥1 batched dependent) and the one-line consequence: "these squash-merge into `<integration-branch>` without individual human review to unblock their dependents — *only if* their independent `/code-review` pass is clean; a task held back by blocking findings stays an open PR and its dependents are skipped."
 - The skipped tasks and their recommended next step.
 
 Stop for approval, redirect, or correction of the DAG. **Do not start the workflow yet.** This is the batch's single approval gate.
@@ -79,23 +81,24 @@ Workflow({
 })
 ```
 
-The workflow runs in the background and returns a structured `{ results, summary }`. It schedules each task to fire the moment *its* dependencies finish (true DAG scheduling, not whole-wave barriers), runs each task as the Prep → Implement → Land pipeline in isolated worktrees, and squash-merges any task that has a batched dependent. You do not babysit it; `/workflows` shows live progress, grouped by stage.
+The workflow runs in the background and returns a structured `{ results, summary }`. It schedules each task to fire the moment *its* dependencies finish (true DAG scheduling, not whole-wave barriers), runs each task as the Prep → Implement → Review → Land pipeline in isolated worktrees, and squash-merges any task that has a batched dependent **whose independent code-review came back clean** (one held back by blocking findings stays an open PR and its dependents cascade-skip). You do not babysit it; `/workflows` shows live progress, grouped by stage.
 
 ## Step 6: Report
 
 Three-block output per [docs/agents/output-format.md](../../../docs/agents/output-format.md). Cover, from the workflow's `summary` plus the Step 2 skipped set:
 
 ```
-Batched #<P>: <opened> PR(s) opened, <shipped> predecessor(s) squash-merged to unblock dependents, <failed> failed/skipped.
+Batched #<P>: <opened> PR(s) opened, <shipped> predecessor(s) squash-merged to unblock dependents, <heldForReview> held by code-review, <failed> failed/skipped.
 
 - PRs opened (awaiting review): #<N> <url> · ...
-- Squash-merged into <integration-branch> (no individual review): #<N> · ...   ← only if any
+- Squash-merged into <integration-branch> (no individual human review, code-review clean): #<N> · ...   ← only if any
+- Held from auto-ship by code-review (<blockingCount> blocking finding(s), PR open for a human): #<N> <url> · ...   ← only if any
 - Failed / skipped: #<N> — <blocker or "not ready: run /triage"> · ...
 
-> Next step: review the open PRs, then `/ship` the slice once its children are closed.
+> Next step: review the open PRs, resolve any code-review-held tasks (then `/ship` them so their dependents can be re-batched), and `/ship` the slice once its children are closed.
 ```
 
-Call out the auto-merged tasks explicitly — they landed without individual review, and the reviewer should know to inspect them inside the eventual slice-promotion PR.
+Call out the auto-merged tasks explicitly — they landed without individual human review (their independent `/code-review` was clean), and the reviewer should know to inspect them inside the eventual slice-promotion PR. Call out held-for-review tasks too: each blocked its dependents, so resolving and shipping it is what unblocks the rest.
 
 ## What this skill does NOT do
 
