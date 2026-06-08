@@ -61,3 +61,6 @@ temp/
 
 # Claude Code local (user-specific) settings
 .claude/settings.local.json
+
+# Transient worktrees created by the /batch workflow runner
+.claude/worktrees/
