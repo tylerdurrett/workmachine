@@ -16,20 +16,23 @@ interface CapturedRequest {
 
 /**
  * Build a `fetch` stub that records the request it was called with and replies
- * with the given status + JSON body.
+ * with the given status + JSON body. `responseHeaders` are merged onto the
+ * reply (e.g. an `ETag` for the conditional-poll path); a `304` status sends an
+ * empty body, matching GitHub's `Not Modified`.
  */
 function stubFetch(
   status: number,
   jsonBody: unknown,
+  responseHeaders?: Record<string, string>,
 ): { fetch: typeof fetch; calls: CapturedRequest[] } {
   const calls: CapturedRequest[] = [];
   const fetchImpl: typeof fetch = (input, init) => {
     const url = input instanceof Request ? input.url : input.toString();
     calls.push({ url, init });
     return Promise.resolve(
-      new Response(JSON.stringify(jsonBody), {
+      new Response(status === 304 ? null : JSON.stringify(jsonBody), {
         status,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...responseHeaders },
       }),
     );
   };
@@ -260,17 +263,89 @@ describe('GitHubTracker.renderReviewCard', () => {
   });
 });
 
-describe('GitHubTracker adapter methods (stubbed for later tasks)', () => {
-  const tracker: TrackerAdapter = new GitHubTracker({
-    token: 'tok',
-    owner: 'acme',
-    repo: 'widgets',
-  });
-  const card = { id: '1', url: 'https://github.com/acme/widgets/issues/1' };
+describe('GitHubTracker.readCommands', () => {
+  const config = { token: 'tok', owner: 'acme', repo: 'widgets' };
+  const card = { id: '42', url: 'https://github.com/acme/widgets/issues/42' };
 
-  it('rejects readCommands (#34)', async () => {
-    await expect(tracker.readCommands(card)).rejects.toThrow(
-      /not implemented yet \(task #34\)/,
+  const commentsPayload = [
+    {
+      id: 1001,
+      user: { login: 'octocat' },
+      body: '/approve',
+      created_at: '2026-06-08T12:00:00Z',
+    },
+    {
+      id: 1002,
+      user: { login: 'reviewer' },
+      body: '/request-changes add tests',
+      created_at: '2026-06-08T12:05:00Z',
+    },
+  ];
+
+  it('GETs the issue comments and maps them to tracker comments', async () => {
+    const { fetch, calls } = stubFetch(200, commentsPayload, {
+      ETag: 'W/"abc123"',
+    });
+    const tracker = new GitHubTracker(config, { fetch });
+
+    const result = await tracker.readCommands(card);
+
+    expect(result.comments).toEqual([
+      {
+        id: '1001',
+        author: 'octocat',
+        body: '/approve',
+        createdAt: '2026-06-08T12:00:00Z',
+      },
+      {
+        id: '1002',
+        author: 'reviewer',
+        body: '/request-changes add tests',
+        createdAt: '2026-06-08T12:05:00Z',
+      },
+    ]);
+    const [req] = calls;
+    expect(req?.url).toBe(
+      'https://api.github.com/repos/acme/widgets/issues/42/comments',
     );
+    expect(req?.init?.method).toBe('GET');
+    // A first poll carries no conditional header.
+    expect(header(req!, 'If-None-Match')).toBeUndefined();
+  });
+
+  it('reads the ETag and last comment timestamp into the returned cursor', async () => {
+    const { fetch } = stubFetch(200, commentsPayload, { ETag: 'W/"abc123"' });
+    const tracker = new GitHubTracker(config, { fetch });
+
+    const result = await tracker.readCommands(card);
+
+    expect(result.cursor).toEqual({
+      etag: 'W/"abc123"',
+      since: '2026-06-08T12:05:00Z',
+    });
+  });
+
+  it('sends the cursor ETag as If-None-Match on a re-poll', async () => {
+    const { fetch, calls } = stubFetch(200, [], { ETag: 'W/"def456"' });
+    const tracker = new GitHubTracker(config, { fetch });
+
+    await tracker.readCommands(card, { etag: 'W/"abc123"', since: 's' });
+
+    expect(header(calls[0]!, 'If-None-Match')).toBe('W/"abc123"');
+  });
+
+  it('treats a 304 as no new comments and keeps the cursor unchanged', async () => {
+    const cursor = { etag: 'W/"abc123"', since: '2026-06-08T12:05:00Z' };
+    const { fetch } = stubFetch(304, undefined);
+    const tracker = new GitHubTracker(config, { fetch });
+
+    const result = await tracker.readCommands(card, cursor);
+
+    expect(result).toEqual({ comments: [], cursor });
+  });
+
+  it('honors the TrackerAdapter contract type', () => {
+    const tracker: TrackerAdapter = new GitHubTracker(config);
+    expect(typeof tracker.readCommands).toBe('function');
   });
 });
