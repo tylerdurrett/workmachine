@@ -674,6 +674,36 @@ describe('integration smoke: fake GitHub surface (create -> tick -> /approve com
     return logForGated();
   }
 
+  function logForFeedback(): JsonlEventLog {
+    return new JsonlEventLog(
+      resolveRunDir(runsRoot, FEEDBACK_RUN_ID).eventsLogPath,
+    );
+  }
+
+  function feedbackSnapshot() {
+    return loadWorkflowFile(
+      resolveRunDir(runsRoot, FEEDBACK_RUN_ID).workflowSnapshotPath,
+    );
+  }
+
+  /** Create the feedback run, then tick once so greet runs and the gate opens. */
+  async function createFeedbackAndOpenGate(): Promise<JsonlEventLog> {
+    await main(
+      [
+        'run',
+        'create',
+        feedbackWorkflowPath,
+        '--input',
+        'name=World',
+        '--input',
+        `scriptPath=${feedbackScriptPath}`,
+      ],
+      deps(),
+    );
+    await main(['tick', FEEDBACK_RUN_ID], deps());
+    return logForFeedback();
+  }
+
   beforeEach(async () => {
     runsRoot = await mkdtemp(join(tmpdir(), 'wm-smoke-fake-surface-'));
     lines = [];
@@ -778,5 +808,87 @@ describe('integration smoke: fake GitHub surface (create -> tick -> /approve com
     // The replay appended nothing at all: the surviving `command_received` (for
     // comment `c1`) is byte-for-byte the one from the first ingest, not a new one.
     expect(afterReplay).toEqual(afterFirst);
+  });
+
+  it('reuses the same card across a re-tick at the open gate, never minting a second', async () => {
+    const log = await createAndOpenGate();
+
+    // The gate is open and its card was rendered once. No reviewer comment exists,
+    // so the run waits here.
+    expect(log.read().map((e) => e.type)).toEqual([
+      'run_created',
+      'card_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+    ]);
+    const before = log.read();
+    expect(tracker.cardState(FAKE_SURFACE_CARD.id)?.renderCount).toBe(1);
+    expect(tracker.cardState('card-2')).toBeUndefined();
+
+    // Re-tick the run sitting at the open gate: it appends nothing (still waiting
+    // on a command) and, crucially, never mints a second card — the run's recorded
+    // `card-1` is the only one, so a later render threads into it (ADR-0004, one
+    // card per gate) rather than opening a fresh card.
+    await main(['tick', GATED_RUN_ID], deps());
+    expect(log.read()).toEqual(before);
+    expect(tracker.cardState('card-2')).toBeUndefined();
+  });
+
+  it('threads a request_changes revision into the same card off the fake surface', async () => {
+    const log = await createFeedbackAndOpenGate();
+
+    // The gate opened and its single card was rendered once.
+    expect(tracker.cardState(FAKE_SURFACE_CARD.id)?.renderCount).toBe(1);
+    expect(tracker.cardState('card-2')).toBeUndefined();
+
+    // A reviewer leaves `/request-changes <note>` on the card (not via the
+    // `command` CLI). The next tick ingests it, re-dispatches the guarded step
+    // with the feedback resolved in, and re-opens the SAME gate — re-rendering the
+    // same card with the revision threaded, never minting a new one.
+    await tracker.seedComment(
+      FAKE_SURFACE_CARD,
+      `/request-changes ${REVISION_NOTE}`,
+      REVIEWER,
+    );
+    await main(['tick', FEEDBACK_RUN_ID], deps());
+
+    const events = log.read();
+    expect(events.map((e) => e.type)).toEqual([
+      'run_created',
+      'card_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+      'command_received',
+      'gate_decided',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+    ]);
+
+    // The decision flowed through the fake surface as the reviewer's comment.
+    const decided = events.find((e) => e.type === 'gate_decided');
+    expect(decided?.type).toBe('gate_decided');
+    if (decided?.type === 'gate_decided') {
+      expect(decided.decision).toBe('request_changes');
+      expect(decided.actor).toBe(REVIEWER);
+      expect(decided.feedback).toBe(REVISION_NOTE);
+    }
+
+    // The one gate was reused: both `gate_opened`s target the same gate id, and
+    // the run is back at it (ADR-0004 — one card per gate, no new gate minted).
+    const gateIds = events
+      .filter((e) => e.type === 'gate_opened')
+      .map((e) => (e.type === 'gate_opened' ? e.gateId : ''));
+    expect(gateIds).toEqual(['review', 'review']);
+    expect(foldRunState(feedbackSnapshot(), events).openGate).toEqual({
+      gateId: 'review',
+      stepId: 'review',
+    });
+
+    // The SAME card was re-rendered (renderCount bumped) — no second card minted.
+    expect(tracker.cardState(FAKE_SURFACE_CARD.id)?.renderCount).toBe(2);
+    expect(tracker.cardState('card-2')).toBeUndefined();
   });
 });
