@@ -24,7 +24,7 @@ import { runTick } from './tick.js';
  * which makes the minted run id deterministic and the end-to-end flow assertable.
  *
  * Commands:
- *  - `run create <workflowPath> [--input k=v ...] [--run-id <id>]`
+ *  - `run create <workflowPath> [--input k=v ...] [--run-id <id>] [--repo owner/name]`
  *  - `tick <runId>`
  *  - `command <runId> <decision> [text]`
  */
@@ -152,21 +152,23 @@ export async function main(
       options: {
         input: { type: 'string', multiple: true },
         'run-id': { type: 'string' },
+        repo: { type: 'string' },
       },
     });
     const workflowPath = positionals[0];
     if (workflowPath === undefined) {
       throw new Error(
-        'usage: workmachine run create <workflowPath> [--input k=v ...] [--run-id <id>]',
+        'usage: workmachine run create <workflowPath> [--input k=v ...] [--run-id <id>] [--repo owner/name]',
       );
     }
-    // The card's repo is operator-supplied per run, falling back to the
-    // local-dev `WORKMACHINE_SANDBOX_REPO` (ADR-0008). It is recorded on
-    // `card_created` so the run is self-describing.
-    const repo = process.env.WORKMACHINE_SANDBOX_REPO;
+    // The card's repo is operator-supplied per run via `--repo`, falling back to
+    // the local-dev `WORKMACHINE_SANDBOX_REPO` (ADR-0008). It is recorded on
+    // `card_created` so the run is self-describing; the live adapter
+    // (`makeTracker`) re-resolves it alongside the token via resolveGitHubConfig.
+    const repo = values.repo ?? process.env.WORKMACHINE_SANDBOX_REPO;
     if (repo === undefined || repo === '') {
       throw new Error(
-        'no target repo: set WORKMACHINE_SANDBOX_REPO (owner/name)',
+        'no target repo: pass --repo owner/name or set WORKMACHINE_SANDBOX_REPO',
       );
     }
     const { runId } = await runCreate({
@@ -214,7 +216,7 @@ export async function main(
   }
 
   throw new Error(
-    'usage: workmachine <run create <workflowPath> [--input k=v ...] [--run-id <id>] | tick <runId> | command <runId> <approve|request_changes|reject> [text]>',
+    'usage: workmachine <run create <workflowPath> [--input k=v ...] [--run-id <id>] [--repo owner/name] | tick <runId> | command <runId> <approve|request_changes|reject> [text]>',
   );
 }
 

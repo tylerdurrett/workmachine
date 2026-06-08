@@ -89,6 +89,30 @@ describe('main (CLI dispatch)', () => {
     }
   });
 
+  it('opens the card via --repo and records card_created with that repo', async () => {
+    const tracker = new FakeTracker();
+    await main(['run', 'create', workflowPath, '--repo', 'acme/override'], {
+      ...deps(),
+      makeTracker: () => tracker,
+    });
+
+    const events = new JsonlEventLog(
+      resolveRunDir(runsRoot, RUN_ID).eventsLogPath,
+    ).read();
+    const carded = events.find((e) => e.type === 'card_created');
+    expect(carded?.type).toBe('card_created');
+    if (carded?.type === 'card_created') {
+      // The operator's --repo wins over the WORKMACHINE_SANDBOX_REPO fallback.
+      expect(carded.repo).toBe('acme/override');
+      expect(carded.runIdMarker).toBe(RUN_ID);
+    }
+
+    // The fake recorded the card with the workmachine label and run-id body.
+    const card = tracker.cardState('card-1');
+    expect(card?.labels).toEqual(['workmachine']);
+    expect(card?.body).toContain(RUN_ID);
+  });
+
   it('refuses a --run-id collision', async () => {
     const id = 'fixed-id';
     await main(['run', 'create', workflowPath, '--run-id', id], deps());
@@ -99,6 +123,13 @@ describe('main (CLI dispatch)', () => {
 
   it('throws on an unknown command', async () => {
     await expect(main(['bogus'], deps())).rejects.toThrow(/usage/);
+  });
+
+  it('refuses run create when no repo is given and no env fallback is set', async () => {
+    delete process.env.WORKMACHINE_SANDBOX_REPO;
+    await expect(main(['run', 'create', workflowPath], deps())).rejects.toThrow(
+      /no target repo/,
+    );
   });
 
   it('rejects a command with a disallowed decision verb', async () => {
