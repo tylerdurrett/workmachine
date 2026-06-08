@@ -161,5 +161,9 @@ export function writeCursorSidecar(
   cursor: CommandCursor,
 ): void {
   const next = { ...loadCursorSidecar(layout), [cardId]: cursor };
-  writeFileSync(layout.cursorSidecarPath, JSON.stringify(next, null, 2), 'utf8');
+  writeFileSync(
+    layout.cursorSidecarPath,
+    JSON.stringify(next, null, 2),
+    'utf8',
+  );
 }
