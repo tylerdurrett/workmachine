@@ -14,7 +14,10 @@ export const meta = {
 //   parentIssue: number,
 //   tasks: [{ number, title, dependsOn: number[] }]   // dependsOn = hard + inferred edges, must be acyclic
 // }
-const tasks = (args && args.tasks) || []
+// Tolerate args arriving as a JSON-encoded string (some tool-call serializers stringify object args).
+const a = typeof args === 'string' ? JSON.parse(args) : (args || {})
+const tasks = a.tasks || []
+
 if (!tasks.length) {
   log('No ready tasks were passed to batch-execute; nothing to run.')
   return { parentIssue: (args && args.parentIssue) || null, results: [] }
