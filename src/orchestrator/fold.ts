@@ -4,7 +4,10 @@ import type {
   RunState,
   StepState,
 } from '../domain/index.js';
-import { isGateStep, type WorkflowDefinition } from '../workflow/index.js';
+import {
+  guardedWorkSteps,
+  type WorkflowDefinition,
+} from '../workflow/index.js';
 
 /**
  * Pure event-sourced fold: replay an `events.jsonl` log into a {@link RunState}
@@ -215,33 +218,6 @@ export function foldRunState(
   }
 
   return state;
-}
-
-/**
- * The work steps a gate guards: its transitive `needs` predecessors, walking
- * back through `script` steps and stopping at any prior `gate` (that earlier
- * work belongs to the earlier card, ADR-0004). These are the steps a
- * `request_changes` loops back to `pending` so they re-run with feedback.
- */
-function guardedWorkSteps(
-  workflow: WorkflowDefinition,
-  gateStepId: string,
-): string[] {
-  const stepById = new Map(workflow.steps.map((s) => [s.id, s]));
-  const guarded = new Set<string>();
-  const queue = [...(stepById.get(gateStepId)?.needs ?? [])];
-
-  while (queue.length > 0) {
-    const id = queue.shift();
-    if (id === undefined || guarded.has(id)) continue;
-    const step = stepById.get(id);
-    // Stop at a prior gate: its guarded work is a separate review card.
-    if (step === undefined || isGateStep(step)) continue;
-    guarded.add(id);
-    queue.push(...step.needs);
-  }
-
-  return [...guarded];
 }
 
 /** Append produced artifacts to the run-level index (later wins on id clash). */

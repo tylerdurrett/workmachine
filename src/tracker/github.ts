@@ -3,6 +3,7 @@ import type {
   CardRef,
   CreateRunCardInput,
   ReadCommandsResult,
+  RenderReviewCardInput,
   TrackerAdapter,
   TrackerComment,
 } from './types.js';
@@ -17,9 +18,10 @@ import type {
  * The skeleton (#31) stood up config resolution, the authenticated HTTP client,
  * and a `verifyAccess` smoke path that proves live reachability. Intake (#32)
  * implements `createRunCard` (open the issue carrying the run-id body marker and
- * the `workmachine` label) and `postComment`; `renderReviewCard` (#33) and the
- * ETag-cursor `readCommands` (#34) stay stubbed until their tasks own them. The
- * human-watched live demo against the sandbox repo is deferred to its own task.
+ * the `workmachine` label) and `postComment`; review-card projection (#33)
+ * implements `renderReviewCard` (PATCH the issue body in place); the ETag-cursor
+ * `readCommands` (#34) stays stubbed until its task owns it. The human-watched
+ * live demo against the sandbox repo is deferred to its own task.
  *
  * GitHub-specific naming stays inside this file (CONTEXT.md → Language): the
  * interface speaks card / comment / command / cursor; only here do those map onto
@@ -169,8 +171,23 @@ export class GitHubTracker implements TrackerAdapter {
     return { id: String(issue.number), url: issue.html_url };
   }
 
-  renderReviewCard(): Promise<void> {
-    return notImplemented('renderReviewCard', 33);
+  /**
+   * Render (re-render) the single review card by replacing its issue body in
+   * place: `PATCH /repos/{owner}/{repo}/issues/{id}` with `{ body }` (ADR-0004,
+   * ADR-0008). Idempotent — it always targets the card named by `input.card`,
+   * never opening a new issue, so a re-render or a `request_changes` revision
+   * lands on the same card. Returns `void`: the body is not read back, and
+   * `request()` already throws on any non-2xx, so success is simply not throwing.
+   */
+  async renderReviewCard(input: RenderReviewCardInput): Promise<void> {
+    const { owner, repo } = this.config;
+    await this.request(
+      'PATCH',
+      `/repos/${owner}/${repo}/issues/${input.card.id}`,
+      {
+        body: input.body,
+      },
+    );
   }
 
   readCommands(): Promise<ReadCommandsResult> {

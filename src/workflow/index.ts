@@ -1,3 +1,4 @@
+export { guardedWorkSteps } from './gate-context.js';
 export {
   ARTIFACT_REF_RE,
   FEEDBACK_REF_RE,

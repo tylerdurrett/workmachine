@@ -191,7 +191,7 @@ export async function main(
     if (runId === undefined) {
       throw new Error('usage: workmachine tick <runId>');
     }
-    await runTick({ runId, runsRoot, now });
+    await runTick({ runId, runsRoot, now, makeTracker });
     log(`ticked ${runId}`);
     return;
   }

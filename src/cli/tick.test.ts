@@ -74,6 +74,53 @@ describe('runTick', () => {
     expect(log.read()).toHaveLength(events.length);
   });
 
+  it('renders the review card through the injected tracker when a gate opens', async () => {
+    // A gated workflow: one script step feeding a review gate.
+    const gatedPath = join(runsRoot, 'gated.yaml');
+    writeFileSync(
+      gatedPath,
+      `
+slug: tiny-smoke
+steps:
+  - id: greet
+    type: script
+    run: 'printf hi > {{artifacts.out.path}}'
+    produces:
+      - id: out
+        path: artifacts/out.txt
+  - id: review
+    type: gate
+    needs: [greet]
+    allowed_decisions: [approve, request_changes, reject]
+`,
+      'utf8',
+    );
+
+    // One FakeTracker shared between create (opens the card) and tick (renders
+    // into it): the run records `card-1` + its repo on `card_created`, and the
+    // injected factory hands the very same tracker back so the tick re-renders
+    // that card — no live GitHub anywhere.
+    const tracker = new FakeTracker();
+    const { runId } = await runCreate({
+      workflowPath: gatedPath,
+      inputs: {},
+      runId: undefined,
+      runsRoot,
+      now,
+      rand,
+      tracker,
+      repo: 'acme/widgets',
+    });
+
+    await runTick({ runId, runsRoot, now, makeTracker: () => tracker });
+
+    // The run ran the script step, opened the gate, and the card was rendered.
+    const stored = tracker.cardState('card-1');
+    expect(stored?.renderCount).toBe(1);
+    expect(stored?.body).toContain('### Allowed decisions');
+    expect(stored?.body).toContain('artifacts/out.txt');
+  });
+
   it('throws on a nonexistent run id', async () => {
     await expect(
       runTick({ runId: 'no-such-run', runsRoot, now }),
