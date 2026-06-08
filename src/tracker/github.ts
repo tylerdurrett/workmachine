@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type {
   CardRef,
+  CommandCursor,
   CreateRunCardInput,
   ReadCommandsResult,
   RenderReviewCardInput,
@@ -19,9 +20,10 @@ import type {
  * and a `verifyAccess` smoke path that proves live reachability. Intake (#32)
  * implements `createRunCard` (open the issue carrying the run-id body marker and
  * the `workmachine` label) and `postComment`; review-card projection (#33)
- * implements `renderReviewCard` (PATCH the issue body in place); the ETag-cursor
- * `readCommands` (#34) stays stubbed until its task owns it. The human-watched
- * live demo against the sandbox repo is deferred to its own task.
+ * implements `renderReviewCard` (PATCH the issue body in place); command polling
+ * (#34) implements `readCommands` (GET the issue comments with an `If-None-Match`
+ * conditional request driven by the cursor's ETag). The human-watched live demo
+ * against the sandbox repo is deferred to its own task.
  *
  * GitHub-specific naming stays inside this file (CONTEXT.md → Language): the
  * interface speaks card / comment / command / cursor; only here do those map onto
@@ -190,8 +192,52 @@ export class GitHubTracker implements TrackerAdapter {
     );
   }
 
-  readCommands(): Promise<ReadCommandsResult> {
-    return notImplemented('readCommands', 34);
+  /**
+   * Poll the card's issue for new comments:
+   * `GET /repos/{owner}/{repo}/issues/{id}/comments`. The cursor's `etag` rides
+   * along as `If-None-Match` so an unchanged comment list comes back `304 Not
+   * Modified` — GitHub costs us no rate-limit budget and we return no comments
+   * with the cursor unchanged. On a `200`, the response `ETag` becomes the next
+   * cursor's `etag`, and the latest comment's `created_at` its coarse `since`
+   * watermark (CONTEXT.md → Command; ADR-0006).
+   *
+   * Returned comments are raw {@link TrackerComment}s. Parsing them into
+   * `/approve`-style commands is the command parser's job; ingesting them into
+   * the log with comment-id dedup is the next task. The cursor here is only a
+   * fetch optimization, never an exactly-once boundary.
+   */
+  async readCommands(
+    card: CardRef,
+    sinceCursor?: CommandCursor,
+  ): Promise<ReadCommandsResult> {
+    const { owner, repo } = this.config;
+    const response = await this.send(
+      'GET',
+      `/repos/${owner}/${repo}/issues/${card.id}/comments`,
+      sinceCursor?.etag !== undefined
+        ? { 'If-None-Match': sinceCursor.etag }
+        : undefined,
+    );
+
+    // 304: nothing changed since the cursor's ETag — no comments, same cursor.
+    if (response.status === 304) {
+      return { comments: [], cursor: sinceCursor ?? {} };
+    }
+
+    const comments = z
+      .array(commentSchema)
+      .parse(await response.json())
+      .map(toTrackerComment);
+
+    const etag = response.headers.get('ETag') ?? undefined;
+    const since = comments.at(-1)?.createdAt ?? sinceCursor?.since;
+    return {
+      comments,
+      cursor: {
+        ...(etag !== undefined && { etag }),
+        ...(since !== undefined && { since }),
+      },
+    };
   }
 
   /**
@@ -206,26 +252,40 @@ export class GitHubTracker implements TrackerAdapter {
       `/repos/${owner}/${repo}/issues/${card.id}/comments`,
       { body },
     );
-    const comment = commentSchema.parse(json);
-    return {
-      id: String(comment.id),
-      author: comment.user?.login ?? '',
-      body: comment.body ?? '',
-      createdAt: comment.created_at,
-    };
+    return toTrackerComment(commentSchema.parse(json));
   }
 
   /**
-   * The single authenticated HTTP entry point. Sets the Bearer credential and
-   * the headers GitHub expects (Accept, API version, User-Agent), and maps any
-   * non-2xx response to a thrown Error carrying the status and GitHub's message.
-   * Returns the parsed JSON body as `unknown` — callers narrow it with zod.
+   * The single authenticated HTTP entry point used by the body-returning
+   * methods. Sends the request via {@link send}, and returns the parsed JSON
+   * body as `unknown` — callers narrow it with zod. `send` already threw on any
+   * non-2xx, so reaching here means success.
    */
   private async request(
     method: string,
     path: string,
     body?: unknown,
   ): Promise<unknown> {
+    const response = await this.send(method, path, undefined, body);
+    return response.json();
+  }
+
+  /**
+   * The low-level authenticated request: sets the Bearer credential and the
+   * headers GitHub expects (Accept, API version, User-Agent), merges any caller
+   * `extraHeaders` (e.g. `If-None-Match` for a conditional poll), and returns
+   * the raw {@link Response} so callers can read response headers like `ETag`.
+   *
+   * It throws on a non-2xx response with the status and GitHub's message —
+   * except `304 Not Modified`, which a conditional request expects and the
+   * caller handles, so it is passed back rather than treated as an error.
+   */
+  private async send(
+    method: string,
+    path: string,
+    extraHeaders?: Record<string, string>,
+    body?: unknown,
+  ): Promise<Response> {
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
       headers: {
@@ -234,31 +294,37 @@ export class GitHubTracker implements TrackerAdapter {
         'X-GitHub-Api-Version': API_VERSION,
         'User-Agent': 'work-machine',
         ...(body !== undefined && { 'Content-Type': 'application/json' }),
+        ...extraHeaders,
       },
       ...(body !== undefined && { body: JSON.stringify(body) }),
     });
 
-    if (!response.ok) {
+    if (!response.ok && response.status !== 304) {
       const message = await readErrorMessage(response);
       throw new Error(
         `GitHub ${method} ${path} failed: ${String(response.status)} ${message}`,
       );
     }
 
-    return response.json();
+    return response;
   }
 }
 
 /**
- * The shared rejection for an adapter method this slice (#31) leaves stubbed,
- * naming the task that owns its implementation.
+ * Map GitHub's comment shape onto the tracker-agnostic {@link TrackerComment}:
+ * `id`→`String(id)` (the canonical idempotency key), `user.login`→`author`, and
+ * `created_at`→`createdAt`. A missing `user` or `body` (deleted account, empty
+ * comment) collapses to an empty string rather than failing the poll.
  */
-function notImplemented(method: string, taskNumber: number): Promise<never> {
-  return Promise.reject(
-    new Error(
-      `GitHubTracker.${method} not implemented yet (task #${String(taskNumber)})`,
-    ),
-  );
+function toTrackerComment(
+  comment: z.infer<typeof commentSchema>,
+): TrackerComment {
+  return {
+    id: String(comment.id),
+    author: comment.user?.login ?? '',
+    body: comment.body ?? '',
+    createdAt: comment.created_at,
+  };
 }
 
 /** GitHub error bodies carry a top-level `message`; tolerate its absence. */

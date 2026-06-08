@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { parseCommands } from './command-parser.js';
 import { FakeTracker } from './fake.js';
 
 /**
@@ -93,5 +94,64 @@ describe('FakeTracker', () => {
     const ghost = { id: 'card-99', url: 'fake://card/card-99' };
 
     await expect(tracker.postComment(ghost, 'x')).rejects.toThrow(/card-99/);
+  });
+
+  it('seeds a reviewer comment under a chosen author, distinct from workmachine', async () => {
+    const tracker = new FakeTracker();
+    const card = await tracker.createRunCard({ title: 'Run', body: 'state' });
+
+    const seeded = await tracker.seedComment(card, '/approve', 'octocat');
+    expect(seeded.author).toBe('octocat');
+
+    const { comments } = await tracker.readCommands(card);
+    expect(comments).toEqual([seeded]);
+  });
+
+  it('cursors past seeded comments: a re-poll is empty until a new one arrives', async () => {
+    const tracker = new FakeTracker();
+    const card = await tracker.createRunCard({ title: 'Run', body: 'state' });
+
+    await tracker.seedComment(card, '/approve', 'reviewer');
+    const first = await tracker.readCommands(card);
+    expect(first.comments).toHaveLength(1);
+
+    const second = await tracker.readCommands(card, first.cursor);
+    expect(second.comments).toEqual([]);
+
+    const later = await tracker.seedComment(
+      card,
+      '/request-changes redo it',
+      'reviewer',
+    );
+    const third = await tracker.readCommands(card, second.cursor);
+    expect(third.comments).toEqual([later]);
+  });
+});
+
+describe('polling an issue yields parsed candidate commands', () => {
+  it('composes fake.readCommands -> parseCommands end to end', async () => {
+    // The fake stands in for a reviewer; the parser turns the polled comments
+    // into the candidate commands the next task ingests. No live GitHub.
+    const tracker = new FakeTracker();
+    const card = await tracker.createRunCard({ title: 'Run', body: 'state' });
+
+    await tracker.seedComment(card, 'looks good, shipping soon', 'octocat');
+    await tracker.seedComment(card, '/request-changes add a test', 'reviewer');
+    await tracker.seedComment(card, '/approve', 'maintainer');
+
+    const { comments } = await tracker.readCommands(card);
+    const commands = parseCommands(comments);
+
+    // The chatter comment is dropped; the two slash commands survive in order,
+    // each carrying its stable comment id, author, verb, and trailing text.
+    expect(commands).toEqual([
+      {
+        commentId: 'c2',
+        actor: 'reviewer',
+        decision: 'request_changes',
+        feedback: 'add a test',
+      },
+      { commentId: 'c3', actor: 'maintainer', decision: 'approve' },
+    ]);
   });
 });

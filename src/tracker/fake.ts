@@ -91,10 +91,34 @@ export class FakeTracker implements TrackerAdapter {
   }
 
   postComment(card: CardRef, body: string): Promise<TrackerComment> {
+    return this.append(card, body, FakeTracker.DEFAULT_AUTHOR);
+  }
+
+  /**
+   * Seed a comment authored by an arbitrary handle, simulating a *reviewer*
+   * leaving a `/approve` on the card — something the adapter's own
+   * {@link postComment} can't express, since coordinator-posted comments are
+   * always stamped `workmachine`. Test-only: it lets a parser/polling test
+   * stand in for a human reviewer without live GitHub.
+   */
+  seedComment(
+    card: CardRef,
+    body: string,
+    author: string,
+  ): Promise<TrackerComment> {
+    return this.append(card, body, author);
+  }
+
+  /** Mint, store, and return a comment with the given author. */
+  private append(
+    card: CardRef,
+    body: string,
+    author: string,
+  ): Promise<TrackerComment> {
     return this.requireCard(card.id).then(() => {
       const comment: TrackerComment = {
         id: `c${String(this.nextCommentSeq)}`,
-        author: FakeTracker.DEFAULT_AUTHOR,
+        author,
         body,
         createdAt: this.now(),
       };
