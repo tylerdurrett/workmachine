@@ -225,6 +225,41 @@ describe('GitHubTracker.postComment', () => {
   });
 });
 
+describe('GitHubTracker.renderReviewCard', () => {
+  const config = { token: 'tok', owner: 'acme', repo: 'widgets' };
+  const card = { id: '42', url: 'https://github.com/acme/widgets/issues/42' };
+
+  it('PATCHes the issue body in place and resolves on a 2xx', async () => {
+    const { fetch, calls } = stubFetch(200, {
+      number: 42,
+      html_url: card.url,
+    });
+    const tracker = new GitHubTracker(config, { fetch });
+
+    await expect(
+      tracker.renderReviewCard({ card, body: '## Review: gate' }),
+    ).resolves.toBeUndefined();
+
+    expect(calls).toHaveLength(1);
+    const [req] = calls;
+    expect(req?.url).toBe(
+      'https://api.github.com/repos/acme/widgets/issues/42',
+    );
+    expect(req?.init?.method).toBe('PATCH');
+    expect(header(req!, 'Content-Type')).toBe('application/json');
+    expect(jsonBody(req)).toEqual({ body: '## Review: gate' });
+  });
+
+  it('throws with the status and GitHub message on a non-2xx response', async () => {
+    const { fetch } = stubFetch(404, { message: 'Not Found' });
+    const tracker = new GitHubTracker(config, { fetch });
+
+    await expect(tracker.renderReviewCard({ card, body: 'b' })).rejects.toThrow(
+      /404 Not Found/,
+    );
+  });
+});
+
 describe('GitHubTracker adapter methods (stubbed for later tasks)', () => {
   const tracker: TrackerAdapter = new GitHubTracker({
     token: 'tok',
@@ -233,10 +268,7 @@ describe('GitHubTracker adapter methods (stubbed for later tasks)', () => {
   });
   const card = { id: '1', url: 'https://github.com/acme/widgets/issues/1' };
 
-  it('rejects renderReviewCard (#33) and readCommands (#34)', async () => {
-    await expect(tracker.renderReviewCard({ card, body: 'b' })).rejects.toThrow(
-      /not implemented yet \(task #33\)/,
-    );
+  it('rejects readCommands (#34)', async () => {
     await expect(tracker.readCommands(card)).rejects.toThrow(
       /not implemented yet \(task #34\)/,
     );
