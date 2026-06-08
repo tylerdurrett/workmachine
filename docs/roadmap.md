@@ -1,7 +1,7 @@
 # Work Machine Roadmap
 
 Repo-level phase map. Decomposed work lives in GitHub issues (the
-initiative is [#1](https://github.com/tylerdurrett/work-machine/issues/1);
+initiative is [#1](https://github.com/tylerdurrett/workmachine/issues/1);
 its candidate-features list is the live backlog). This doc keeps the
 sequencing story before work becomes specs.
 
@@ -11,7 +11,7 @@ step at a time before chasing a full pipeline.
 
 ## Phase 0 — Project setup / docs migration ✅
 
-- [x] Create repo `tylerdurrett/work-machine`; establish it as canonical
+- [x] Create repo `tylerdurrett/workmachine`; establish it as canonical
       engineering-docs surface (ADR-0002).
 - [x] Project-facing README, CONTEXT, charter, architecture, roadmap.
 - [x] Foundational architecture grilled and recorded: ADR-0003

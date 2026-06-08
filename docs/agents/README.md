@@ -179,3 +179,4 @@ If you find yourself writing skill prose that violates one of those, push back; 
 - [lifecycle-initiative.md](lifecycle-initiative.md): initiative-tier conventions (no integration branch, manual closure, two-phase intent → materialization).
 - [output-format.md](output-format.md): end-of-run output template, voice rules, exception list.
 - [domain.md](domain.md): how skills consume the project's domain documentation (`CONTEXT.md`, ADRs).
+- [real-testing.md](real-testing.md): why every externally-facing slice needs a human-watched live demo, not just fake-backed unit tests.

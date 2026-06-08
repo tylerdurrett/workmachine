@@ -39,8 +39,8 @@ Bulleted URLs or refs to the artifacts that just changed. Skip the block (no lea
 Examples:
 
 ```
-- https://github.com/tylerdurrett/work-machine/issues/182
-- https://github.com/tylerdurrett/work-machine/pull/45
+- https://github.com/tylerdurrett/workmachine/issues/182
+- https://github.com/tylerdurrett/workmachine/pull/45
 - branch: feature/issue-12-inbox (pushed)
 ```
 
@@ -110,7 +110,7 @@ If the run produced five tiny things in the same bucket, write one line summariz
 ```
 Decomposed feature #82 into 4 slices (#83–#86), declared the feature integration branch.
 
-- https://github.com/tylerdurrett/work-machine/issues/82
+- https://github.com/tylerdurrett/workmachine/issues/82
 - branch declared: feature/issue-82-csv-export
 - new slices: #83, #84, #85, #86
 
@@ -122,7 +122,7 @@ Decomposed feature #82 into 4 slices (#83–#86), declared the feature integrati
 ```
 Shipped task #143 via PR #144. The export-pipeline slice now has 3 of 4 tasks landed.
 
-- https://github.com/tylerdurrett/work-machine/pull/144
+- https://github.com/tylerdurrett/workmachine/pull/144
 - on branch: slice/issue-83-export-pipeline
 - task issue closed: #143
 
@@ -134,7 +134,7 @@ Shipped task #143 via PR #144. The export-pipeline slice now has 3 of 4 tasks la
 ```
 Feature #82 shipped to production. Bulk CSV export is live.
 
-- https://github.com/tylerdurrett/work-machine/pull/210 (promotion PR)
+- https://github.com/tylerdurrett/workmachine/pull/210 (promotion PR)
 - feature issue closed: #82
 - ticked row on initiative #50's progress comment
 
@@ -148,8 +148,8 @@ The outcome line carries the moment-of-truth: "shipped to production" for featur
 ```
 Filed two cleanup specs.
 
-- https://github.com/tylerdurrett/work-machine/issues/194 (Centralize Postgres helpers in the shared package)
-- https://github.com/tylerdurrett/work-machine/issues/195 (Consolidate storage-provider helpers)
+- https://github.com/tylerdurrett/workmachine/issues/194 (Centralize Postgres helpers in the shared package)
+- https://github.com/tylerdurrett/workmachine/issues/195 (Consolidate storage-provider helpers)
 
 Stop.
 ```

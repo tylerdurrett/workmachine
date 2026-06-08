@@ -46,6 +46,9 @@ desktop.ini
 *.swo
 *~
 
+# Run instances (event logs + artifacts are local and gitignored; see CONTEXT.md)
+runs/
+
 # Misc
 tmp/
 temp/
@@ -55,3 +58,9 @@ temp/
 
 # Per-machine pointer to the local Obsidian vault path (see obsidian skill)
 .obsidian-vault-path
+
+# Claude Code local (user-specific) settings
+.claude/settings.local.json
+
+# Transient worktrees created by the /batch workflow runner
+.claude/worktrees/

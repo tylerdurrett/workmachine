@@ -1,0 +1,22 @@
+slug: tiny-smoke
+name: Tiny Smoke
+description: >-
+  The engine's committed gateless example. One script step greets a name and
+  writes a single small artifact, exercising the create -> tick -> completed
+  spine end to end.
+inputs:
+  name:
+    type: string
+    description: Who to greet; substituted into the greeting text.
+  scriptPath:
+    type: string
+    description: >-
+      Absolute path to the committed greet.sh. The step locates its script via
+      this input because the resolver has no {{workflow.dir}} token.
+steps:
+  - id: greet
+    type: script
+    run: 'sh "{{inputs.scriptPath}}" "{{inputs.name}}" "{{artifacts.greeting.path}}"'
+    produces:
+      - id: greeting
+        path: artifacts/greeting.txt

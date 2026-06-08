@@ -89,4 +89,4 @@ Optional labels that describe what kind of work a spec represents, orthogonal to
 
 ## Label inventory
 
-All seven state-axis labels, the `in-progress` lifecycle label, the four `size:*` labels, and the three category labels live on `tylerdurrett/work-machine`. Edit the right-hand column above if labels are renamed.
+All seven state-axis labels, the `in-progress` lifecycle label, the four `size:*` labels, and the three category labels live on `tylerdurrett/workmachine`. Edit the right-hand column above if labels are renamed.
