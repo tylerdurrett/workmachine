@@ -71,6 +71,22 @@ export interface StepState {
   feedback?: string;
 }
 
+/**
+ * The run's tracker card, derived from the `card_created` fact in the log. It is
+ * the projection target the run's state renders onto; recorded here so the
+ * folded state is self-describing without re-reading the tracker. The domain
+ * stays tracker-agnostic (CONTEXT.md → Language): this is a card ref, never a
+ * GitHub issue.
+ */
+export interface RunCard {
+  /** Provider-stable card id (the GitHub issue number, as a string). */
+  id: string;
+  /** Human-openable url for the card surface. */
+  url: string;
+  /** The `owner/name` repo the card was opened against. */
+  repo: string;
+}
+
 /** The currently-open gate: at most one this slice (ADR-0004). */
 export interface OpenGate {
   /** Stable id of the open gate (the target a command must match). */
@@ -98,6 +114,12 @@ export interface RunState {
   steps: Record<string, StepState>;
   /** Artifacts accumulated across the run. */
   artifacts: ArtifactIndexEntry[];
+  /**
+   * The run's tracker card, once `run create` has opened it (`card_created`).
+   * Absent until the card is opened; the field is omitted (not `undefined`)
+   * under `exactOptionalPropertyTypes`.
+   */
+  card?: RunCard;
   /**
    * The currently-open gate, if any. Set when a `gate_opened` has no matching
    * `gate_decided` yet; cleared once the gate is decided. At most one this slice

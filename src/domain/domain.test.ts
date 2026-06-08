@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { foldRunState } from '../orchestrator/index.js';
+import type { WorkflowDefinition } from '../workflow/index.js';
 import type {
   ArtifactIndexEntry,
   Decision,
@@ -27,9 +29,19 @@ describe('domain type contracts', () => {
         inputs: { name: 'world' },
       },
       {
-        type: 'step_dispatched',
+        type: 'card_created',
         runId,
         seq: 1,
+        ts: '2026-06-07T12:00:00.500Z',
+        cardId: '42',
+        cardUrl: 'https://github.com/acme/widgets/issues/42',
+        runIdMarker: runId,
+        repo: 'acme/widgets',
+      },
+      {
+        type: 'step_dispatched',
+        runId,
+        seq: 2,
         ts: '2026-06-07T12:00:01.000Z',
         stepId: 'greet',
         command: 'echo "hello world"',
@@ -37,7 +49,7 @@ describe('domain type contracts', () => {
       {
         type: 'step_succeeded',
         runId,
-        seq: 2,
+        seq: 3,
         ts: '2026-06-07T12:00:02.000Z',
         stepId: 'greet',
         artifacts: [artifact],
@@ -45,7 +57,7 @@ describe('domain type contracts', () => {
       {
         type: 'step_failed',
         runId,
-        seq: 3,
+        seq: 4,
         ts: '2026-06-07T12:00:03.000Z',
         stepId: 'flaky',
         reason: 'exit code 1',
@@ -53,22 +65,23 @@ describe('domain type contracts', () => {
       {
         type: 'run_completed',
         runId,
-        seq: 4,
+        seq: 5,
         ts: '2026-06-07T12:00:04.000Z',
         artifacts: [artifact],
       },
       {
         type: 'run_failed',
         runId,
-        seq: 5,
+        seq: 6,
         ts: '2026-06-07T12:00:05.000Z',
         reason: 'step flaky failed',
       },
     ];
 
-    expect(log).toHaveLength(6);
+    expect(log).toHaveLength(7);
     expect(log.map((e) => e.type)).toEqual([
       'run_created',
+      'card_created',
       'step_dispatched',
       'step_succeeded',
       'step_failed',
@@ -184,5 +197,48 @@ describe('domain type contracts', () => {
   it('models an ArtifactIndexEntry', () => {
     expect(artifact.size).toBe(12);
     expect(artifact.sha256).toHaveLength(64);
+  });
+});
+
+describe('foldRunState card_created handling', () => {
+  const workflow: WorkflowDefinition = {
+    slug: 'tiny-smoke',
+    inputs: {},
+    steps: [
+      { id: 'greet', type: 'script', run: 'true', needs: [], produces: [] },
+    ],
+  };
+
+  it('records the card ref into derived state, advancing no step lifecycle', () => {
+    const log: EngineEvent[] = [
+      {
+        type: 'run_created',
+        runId,
+        seq: 0,
+        ts: '2026-06-07T12:00:00.000Z',
+        workflowSlug: 'tiny-smoke',
+        inputs: {},
+      },
+      {
+        type: 'card_created',
+        runId,
+        seq: 1,
+        ts: '2026-06-07T12:00:00.500Z',
+        cardId: '42',
+        cardUrl: 'https://github.com/acme/widgets/issues/42',
+        runIdMarker: runId,
+        repo: 'acme/widgets',
+      },
+    ];
+
+    const state = foldRunState(workflow, log);
+
+    expect(state.card).toEqual({
+      id: '42',
+      url: 'https://github.com/acme/widgets/issues/42',
+      repo: 'acme/widgets',
+    });
+    // The fold records the card but touches no step: greet stays pending.
+    expect(state.steps.greet?.status).toBe('pending');
   });
 });

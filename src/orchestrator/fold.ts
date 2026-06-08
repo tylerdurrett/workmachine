@@ -101,6 +101,16 @@ export function foldRunState(
         state.status = 'running';
         break;
       }
+      case 'card_created': {
+        // Record-only: the card ref is a canonical fact projected into derived
+        // state so the snapshot is self-describing. It advances no step lifecycle.
+        state.card = {
+          id: event.cardId,
+          url: event.cardUrl,
+          repo: event.repo,
+        };
+        break;
+      }
       case 'step_dispatched': {
         danglingDispatch.add(event.stepId);
         steps[event.stepId] = {

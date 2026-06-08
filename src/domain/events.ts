@@ -21,6 +21,7 @@ import type { ArtifactIndexEntry } from './artifacts.js';
 /** The discriminant tags for every event kind in the log. */
 export type EngineEventType =
   | 'run_created'
+  | 'card_created'
   | 'step_dispatched'
   | 'step_succeeded'
   | 'step_failed'
@@ -67,6 +68,29 @@ export interface RunCreatedEvent extends EventEnvelope {
   workflowSlug: string;
   /** The operator-supplied inputs the run was created with. */
   inputs: Record<string, unknown>;
+}
+
+/**
+ * The run's tracker card was opened (intake): `run create` opened the run's
+ * GitHub issue and recorded the returned card ref here as a canonical fact
+ * (ADR-0008). The card body carries the {@link runIdMarker} — the run id itself
+ * — which is the later idempotency anchor for the card. The `repo` it was opened
+ * against is recorded too so the run is self-describing on replay (the operator
+ * supplies it per run via `--repo`; the engine hard-codes no tracker repo).
+ *
+ * This is a record-only fact: the fold notes the card ref but advances no step
+ * lifecycle.
+ */
+export interface CardCreatedEvent extends EventEnvelope {
+  type: 'card_created';
+  /** Provider-stable card id (the GitHub issue number, as a string). */
+  cardId: string;
+  /** Human-openable url for the card surface. */
+  cardUrl: string;
+  /** The run-id marker embedded in the card body — the card's idempotency anchor. */
+  runIdMarker: string;
+  /** The `owner/name` repo the card was opened against. */
+  repo: string;
 }
 
 /**
@@ -179,6 +203,7 @@ export interface GateDecidedEvent extends EventEnvelope {
 /** Discriminated union of every event kind in the log. */
 export type EngineEvent =
   | RunCreatedEvent
+  | CardCreatedEvent
   | StepDispatchedEvent
   | StepSucceededEvent
   | StepFailedEvent
