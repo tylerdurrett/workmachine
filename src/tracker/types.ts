@@ -59,15 +59,50 @@ export interface RenderReviewCardInput {
 }
 
 /**
- * The actor a tracker stamps on the engine's *own* comments (gate prompts, the
- * rendered review card, coordinator notes) — the bot identity, as opposed to a
- * human reviewer. Ingestion excludes comments authored by this actor so the
- * engine never re-ingests its own output as a command (CONTEXT.md → Command;
- * ADR-0006, AC6). It is the GitHub `workmachine` bot/label name; the in-memory
- * fake stamps the same value on `postComment`, so the exclusion is provider-
- * agnostic and single-sourced here at the seam.
+ * The fake's cosmetic default comment author. No longer an exclusion signal:
+ * self-recognition moved to the body {@link BOT_COMMENT_MARKER}, because the
+ * live adapter stamps a comment's author with the token's own login, never this
+ * fixed handle. Kept only so the in-memory fake has a stable default author;
+ * removed in the ingestion sub-section if nothing else needs it.
  */
 export const BOT_ACTOR = 'workmachine';
+
+/**
+ * The invisible marker the engine stamps into the body of its *own* comments
+ * (gate prompts, coordinator notes) so ingestion never re-ingests them as
+ * reviewer commands (CONTEXT.md → Command; ADR-0006, AC6). This — not the
+ * comment's author — is the self-recognition signal: a real tracker stamps a
+ * comment's author with the token's own login (e.g. `tylerdurrett`), never a
+ * fixed `workmachine` handle, so author-matching can't reliably exclude the
+ * engine's output. A body marker every adapter stamps can, and is the single,
+ * provider-agnostic source both the fake and the live adapter share.
+ *
+ * It is an HTML comment so GitHub's rendered markdown hides it: the marker
+ * survives harmlessly onto future human-facing gate prompts without cluttering
+ * what a reviewer reads.
+ *
+ * Contract assumption: the tracker preserves comment bodies round-trip — what
+ * `postComment` writes is what `readCommands` reads back, marker intact. This
+ * holds for GitHub, Trello, GitLab, and Jira. Escape hatch (NOT implemented):
+ * if a future adapter can't preserve bodies, move self-recognition behind an
+ * adapter predicate (`isOwnComment`) instead of this body marker.
+ */
+export const BOT_COMMENT_MARKER = '<!-- workmachine:bot -->';
+
+/**
+ * Append the bot-comment marker to a comment body, on its own line, so the
+ * engine's own comments are recognizable on the way back in (see
+ * {@link BOT_COMMENT_MARKER}). Every adapter's `postComment` stamps this before
+ * the comment leaves the seam.
+ */
+export function markBotComment(body: string): string {
+  return `${body}\n\n${BOT_COMMENT_MARKER}`;
+}
+
+/** Whether a comment body carries the engine's {@link BOT_COMMENT_MARKER}. */
+export function isBotComment(body: string): boolean {
+  return body.includes(BOT_COMMENT_MARKER);
+}
 
 /**
  * One raw comment read off a card. The `id` is the tracker's stable comment id —
