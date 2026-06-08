@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { EngineEvent } from '../domain/index.js';
 import { scriptExecutor } from '../executor/index.js';
 import { JsonlEventLog, createRunDir, resolveRunDir } from '../run/index.js';
+import { FakeTracker } from '../tracker/index.js';
 import { loadWorkflow } from '../workflow/index.js';
 import type { WorkflowDefinition } from '../workflow/index.js';
 import { tick } from './tick.js';
@@ -206,6 +207,24 @@ steps:
     allowed_decisions: [approve, request_changes, reject]
 `;
 
+  /** A `card_created` fact at the given seq, naming the run's tracker card. */
+  function cardCreated(
+    seq: number,
+    card: { id: string; url: string },
+    repo = 'acme/widgets',
+  ): EngineEvent {
+    return {
+      type: 'card_created',
+      runId,
+      seq,
+      ts: now(),
+      cardId: card.id,
+      cardUrl: card.url,
+      runIdMarker: runId,
+      repo,
+    };
+  }
+
   /** A `command_received` audit fact at the given seq. */
   function command(
     seq: number,
@@ -375,5 +394,132 @@ steps:
       'run_completed',
     ]);
     expect(readFileSync(join(runDir, 'artifacts/out.txt'), 'utf8')).toBe('hi');
+  });
+
+  describe('review-card projection on gate_opened', () => {
+    /**
+     * Seed a gated run whose card already exists on the tracker, returning the
+     * tracker, the card ref, and the run's log/dir. The `card_created` fact names
+     * the same card the tracker minted, so the harness re-renders into it.
+     */
+    async function seedCardedRun(): Promise<{
+      tracker: FakeTracker;
+      cardId: string;
+      log: JsonlEventLog;
+      runDir: string;
+    }> {
+      const workflow = loadWorkflow(GATED_WORKFLOW);
+      const tracker = new FakeTracker();
+      const card = await tracker.createRunCard({ title: 'Run', body: 'seed' });
+      const { log, runDir } = seedRun(workflow, [
+        created(),
+        cardCreated(1, card),
+      ]);
+      return { tracker, cardId: card.id, log, runDir };
+    }
+
+    const workflow = loadWorkflow(GATED_WORKFLOW);
+
+    it('renders the review card into the run card on gate_opened', async () => {
+      const { tracker, cardId, log, runDir } = await seedCardedRun();
+
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+      });
+
+      const stored = tracker.cardState(cardId);
+      // The single review card was rendered once, into the run's existing card.
+      expect(stored?.renderCount).toBe(1);
+      expect(stored?.body).toContain('### Artifacts');
+      expect(stored?.body).toContain('artifacts/out.txt');
+      expect(stored?.body).toMatch(/sha256 `[0-9a-f]{64}`/);
+      expect(stored?.body).toContain('### Allowed decisions');
+      expect(stored?.body).toContain('`approve`');
+      expect(stored?.body).toContain('`request_changes`');
+    });
+
+    it('renders into the run-recorded card ref, never minting a new card', async () => {
+      const { tracker, cardId, log, runDir } = await seedCardedRun();
+
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+      });
+
+      // The harness rendered into the card the run recorded on `card_created`
+      // (`card-1`), not a freshly minted one — the seam reuses the CardRef.
+      expect(cardId).toBe('card-1');
+      expect(tracker.cardState('card-2')).toBeUndefined();
+      expect(tracker.cardState(cardId)?.renderCount).toBe(1);
+    });
+
+    it('re-renders the SAME card with the revision thread after a request_changes loop', async () => {
+      const { tracker, cardId, log, runDir } = await seedCardedRun();
+
+      // First tick: run the work, open the gate, render the card.
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+      });
+      const renderCountAfterOpen = tracker.cardState(cardId)?.renderCount;
+
+      // A reviewer requests changes with feedback. The fold loops the work and
+      // the gate back to pending and records the feedback on the gate's resting
+      // state; the next tick re-runs the work and re-opens the SAME gate.
+      log.append(
+        command(log.read().length, {
+          gateId: 'review',
+          commentId: 'c1',
+          decision: 'request_changes',
+          feedback: 'please tighten the copy',
+        }),
+      );
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+      });
+
+      const stored = tracker.cardState(cardId);
+      // Same card, rendered again (not a new one), now carrying the revision.
+      expect(tracker.cardState('card-2')).toBeUndefined();
+      expect(stored?.renderCount).toBeGreaterThan(renderCountAfterOpen ?? 0);
+      expect(stored?.body).toContain('### Revision requested');
+      expect(stored?.body).toContain('please tighten the copy');
+    });
+
+    it('opens the gate but renders nothing when the run has no card', async () => {
+      // No `card_created` fact: a script-only style run with a gate but no card.
+      const { log, runDir } = seedRun(workflow, [created()]);
+      const tracker = new FakeTracker();
+
+      await tick({
+        workflow,
+        log,
+        executor: scriptExecutor,
+        runDir,
+        now,
+        tracker,
+      });
+
+      // The gate still opened — the projection is a silent no-op without a card.
+      expect(log.read().map((e) => e.type)).toContain('gate_opened');
+    });
   });
 });

@@ -2,12 +2,14 @@ import type { EngineEvent, RunState, StepStatus } from '../domain/index.js';
 import type { Executor } from '../executor/index.js';
 import { decide, foldRunState } from '../orchestrator/index.js';
 import type { EventLog } from '../run/index.js';
+import type { TrackerAdapter } from '../tracker/index.js';
 import {
   isScriptStep,
   type ScriptStep,
   type WorkflowDefinition,
 } from '../workflow/index.js';
 import { resolveCommand } from './resolver.js';
+import { renderReviewCardBody } from './review-card.js';
 
 /**
  * The tick harness: the impure loop that ties the four pure pieces together
@@ -76,6 +78,14 @@ export interface TickDeps {
    * Defaults to wall-clock ISO-8601; tests inject a deterministic stamp.
    */
   now?: () => string;
+  /**
+   * The tracker the run's review card is projected onto. Optional: when absent
+   * (or when the run has no card yet), the gate still opens but no card is
+   * rendered — so a script-only harness test needs no tracker at all. When
+   * present, the harness re-renders the single review card each time it opens a
+   * gate (ADR-0004), reusing the run's recorded {@link RunState.card}.
+   */
+  tracker?: TrackerAdapter;
 }
 
 /**
@@ -87,7 +97,7 @@ export interface TickDeps {
  * @throws if the log has no `run_created` event (an uncreated run can't tick).
  */
 export async function tick(deps: TickDeps): Promise<void> {
-  const { workflow, log, executor, runDir } = deps;
+  const { workflow, log, executor, runDir, tracker } = deps;
   const now = deps.now ?? (() => new Date().toISOString());
 
   for (;;) {
@@ -143,14 +153,21 @@ export async function tick(deps: TickDeps): Promise<void> {
     }
 
     if (decision.kind === 'open_gate') {
-      // The coordinator reached a review step: open its gate and STOP. The run
-      // is genuinely waiting for a command — no further move is possible until
-      // one arrives, so there is nothing to loop for.
+      // The coordinator reached a review step: open its gate, project the review
+      // card, and STOP. The run is genuinely waiting for a command — no further
+      // move is possible until one arrives, so there is nothing to loop for.
       append({
         type: 'gate_opened',
         gateId: decision.gateId,
         stepId: decision.stepId,
       });
+      // Re-fold the log (now including the just-appended `gate_opened`) and
+      // render the single review card for the now-open gate (ADR-0004). The
+      // render is idempotent: re-ticking the same open gate re-renders into the
+      // run's recorded `card` rather than minting a new one. Skipped silently
+      // when there is no tracker or the run has no card yet, so a script-only
+      // run never needs a tracker.
+      await renderGateCard(workflow, log.read(), tracker);
       return;
     }
 
@@ -178,6 +195,33 @@ export async function tick(deps: TickDeps): Promise<void> {
     }
     return;
   }
+}
+
+/**
+ * Project the just-opened gate's review card onto the tracker (ADR-0004). Folds
+ * the log to read the open gate and the run's recorded {@link RunState.card},
+ * renders the card body via the pure projection, and replaces the card body in
+ * place — idempotent, so re-ticking the same open gate re-renders the same card
+ * (the tracker reuses the {@link CardRef}) rather than minting a new one, and a
+ * `request_changes` loop re-renders the same card with the latest feedback.
+ *
+ * A no-op when there is no tracker or the run has no card yet (a script-only run
+ * never opens a card), so this stays invisible to gateless harness paths.
+ */
+async function renderGateCard(
+  workflow: WorkflowDefinition,
+  events: readonly EngineEvent[],
+  tracker: TrackerAdapter | undefined,
+): Promise<void> {
+  if (tracker === undefined) return;
+  const state = foldRunState(workflow, events);
+  if (state.card === undefined) return;
+
+  const body = renderReviewCardBody(workflow, state);
+  await tracker.renderReviewCard({
+    card: { id: state.card.id, url: state.card.url },
+    body,
+  });
 }
 
 /**
