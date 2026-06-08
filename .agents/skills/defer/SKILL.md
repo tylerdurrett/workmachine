@@ -69,17 +69,23 @@ Ask: "Does this grouping look right? Want me to merge / split / drop any?"
 
 Iterate until the user approves. Skip this step only if there's exactly one finding (no grouping decision to make).
 
-### 5. Open the issues
+### 5. Resolve the parent
+
+The cleanup touches code on the surfacing spec's integration branch, not yet on `main`, so it must branch off that same parent. `/execute` walks `**Part of:**` to find it (see [execute](../execute/SKILL.md), "Base branch"), so the issue needs that line.
+
+If the work was surfaced while executing task #T, read #T's body and use #T's own `**Part of:** #<P>` as the cleanup's parent — NOT #T itself (sizes step down by one tier; a task can't parent another task). If #P can't be determined, leave `**Part of:**` off and note it in the end-of-run output so the user can add it manually. Never guess a wrong parent.
+
+### 6. Open the issues
 
 For each approved issue, run `gh issue create` with:
 
 - **Labels:** `needs-triage,cleanup` — both are required. `needs-triage` puts it in the normal triage flow; `cleanup` flags it as housekeeping for periodic sweeps.
 - **Title:** action-oriented and concrete. "Centralize X in `<destination-package>`" beats "X is duplicated."
-- **Body:** use the template below. The "Surfaced by:" line is required so future-you can recover the context.
+- **Body:** use the template below. The `**Part of:**` line (step 5) is the machine-readable lineage `/execute` follows; the `**Surfaced by:**` line is the required human breadcrumb so future-you can recover the context.
 
 Use a HEREDOC for the body so markdown formatting is preserved. After each `gh` call, surface the returned issue URL to the user.
 
-### 6. Print the end-of-run output
+### 7. Print the end-of-run output
 
 Three-block template per [output-format.md](../../../docs/agents/output-format.md). The chain genuinely terminates at `/defer` (the next move is `/triage` on each filed spec, but that's a separate, deliberate decision the maintainer makes later), so close with `Stop.` instead of a `Next step:` line.
 
@@ -99,6 +105,7 @@ Do **not** offer to start work on the issues. Defer's job ends at the file syste
 ## Issue body template
 
 ```markdown
+**Part of:** #<P>
 **Surfaced by:** PR #<N> (<short context, e.g. "asset-materializer simplify pass on branch feat/issue-8-asset-materializer">)
 
 <One paragraph: what the cleanup is and why it's worth doing.>
@@ -126,5 +133,6 @@ Do **not** offer to start work on the issues. Defer's job ends at the file syste
 - **`needs-triage` + `cleanup` are both required.** Never skip `needs-triage` — without it, the issue won't enter the triage state machine and will get lost.
 - **Verify before opening.** Step 2 is non-optional. A stale issue in the tracker is worse than no issue.
 - **Link back to the surfacing PR/branch.** The `Surfaced by:` line is the audit trail.
+- **Set `Part of:` to the surfacing spec's parent, never the spec itself.** Sizes step down by one tier (see [execute](../execute/SKILL.md), "Base branch"). If you can't resolve it, leave it off and tell the user — never guess.
 - **Do not start work on the deferred items.** That's a separate, deliberate decision the user makes after triage.
 - **Don't invent findings.** If the conversation context doesn't have something concrete, ask the user what to defer. Don't fabricate.
