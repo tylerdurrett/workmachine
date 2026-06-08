@@ -10,4 +10,4 @@ The rule:
 
 Why: a fake can pass forever while the real adapter is misconfigured, mis-authed, or wrong about the external contract. The first real run is where those bugs surface — so make the first real run a tracked deliverable, not an afterthought.
 
-See [#37](https://github.com/tylerdurrett/work-machine/issues/37) for the canonical example (the live-demo task added to slice #5).
+See [#37](https://github.com/tylerdurrett/work-machine/issues/37) for the canonical example (the live-demo task added to slice #5), and [../live-demo-runbook.md](../live-demo-runbook.md) for the repeatable procedure it produced.
