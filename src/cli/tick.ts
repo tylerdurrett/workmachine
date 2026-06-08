@@ -2,7 +2,13 @@ import { existsSync } from 'node:fs';
 import { scriptExecutor } from '../executor/index.js';
 import { tick } from '../harness/index.js';
 import { foldRunState } from '../orchestrator/index.js';
-import { JsonlEventLog, resolveRunDir, writeRunCache } from '../run/index.js';
+import {
+  JsonlEventLog,
+  readCursorSidecar,
+  resolveRunDir,
+  writeCursorSidecar,
+  writeRunCache,
+} from '../run/index.js';
 import {
   GitHubTracker,
   resolveGitHubConfig,
@@ -27,6 +33,12 @@ import { isGateStep, loadWorkflowFile } from '../workflow/index.js';
  * tracker is built only for a run that can render a review card — one with a gate
  * step and an opened card — so a gateless run never constructs a tracker it would
  * never use, and the harness skips the projection silently when none is passed.
+ *
+ * It also owns the comment-polling cursor sidecar (ADR-0006): it hands the harness
+ * a reader/writer for the run's `.cursor.json`, keyed on the card id, so the poll
+ * skips comments it has already seen. The cursor is strictly a fetch optimization —
+ * the harness dedups ingestion on the comment id already in the log — so a lost or
+ * corrupt sidecar only costs a redundant read, never a double-ingested comment.
  *
  * Idempotency is inherited from the harness: ticking a completed run reads the
  * log, decides `done`, and returns without appending. We refresh the derived
@@ -95,7 +107,17 @@ export async function runTick(opts: RunTickOptions): Promise<void> {
     executor: scriptExecutor,
     runDir: layout.runDir,
     ...(opts.now ? { now: opts.now } : {}),
-    ...(tracker ? { tracker } : {}),
+    ...(tracker
+      ? {
+          tracker,
+          // The cursor sidecar lives in the run dir, which only the CLI resolves;
+          // thread it to the harness as card-id-keyed callbacks so the harness
+          // stays layout-free. Read/write are non-canonical (ADR-0006).
+          readCursor: (cardId: string) => readCursorSidecar(layout, cardId),
+          writeCursor: (cardId, cursor) =>
+            writeCursorSidecar(layout, cardId, cursor),
+        }
+      : {}),
   });
 
   writeRunCache(layout.runCachePath, log.read());

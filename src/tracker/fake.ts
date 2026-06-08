@@ -1,3 +1,4 @@
+import { BOT_ACTOR } from './types.js';
 import type {
   CardRef,
   CommandCursor,
@@ -25,8 +26,12 @@ import type {
  * so a re-poll with the returned cursor is empty until new comments arrive.
  */
 export class FakeTracker implements TrackerAdapter {
-  /** Default author stamped on comments the adapter itself posts. */
-  private static readonly DEFAULT_AUTHOR = 'workmachine';
+  /**
+   * Author stamped on comments the adapter itself posts (gate prompts, notes).
+   * It is the shared {@link BOT_ACTOR} so ingestion's bot-exclusion (ADR-0006,
+   * AC6) recognizes the fake's own comments exactly as it does the live adapter's.
+   */
+  private static readonly DEFAULT_AUTHOR = BOT_ACTOR;
 
   /** Stored cards, keyed by minted card id. */
   private readonly cards = new Map<string, StoredCard>();

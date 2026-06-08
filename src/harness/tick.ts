@@ -2,7 +2,13 @@ import type { EngineEvent, RunState, StepStatus } from '../domain/index.js';
 import type { Executor } from '../executor/index.js';
 import { decide, foldRunState } from '../orchestrator/index.js';
 import type { EventLog } from '../run/index.js';
-import type { TrackerAdapter } from '../tracker/index.js';
+import {
+  BOT_ACTOR,
+  type CardRef,
+  type CommandCursor,
+  parseCommands,
+  type TrackerAdapter,
+} from '../tracker/index.js';
 import {
   isScriptStep,
   type ScriptStep,
@@ -22,6 +28,11 @@ import { renderReviewCardBody } from './review-card.js';
  * move and carries it out, never deciding for itself what runs next.
  *
  * The loop, per iteration:
+ *   0. ingest tracker commands: poll the run's card for new comments, parse the
+ *      slash commands out of them, and append a `command_received` for each new
+ *      comment id — keyed on the comment id already in the log so a re-poll never
+ *      ingests the same comment twice (ADR-0006). This runs BEFORE `decide` so a
+ *      `/approve` left between ticks is visible to the very next fold;
  *   1. read the log, fold it via `decide`;
  *   2. `done` → stop (the run is already terminal);
  *   3. `run_step` → resolve the command, append `step_dispatched` (with the
@@ -83,9 +94,26 @@ export interface TickDeps {
    * (or when the run has no card yet), the gate still opens but no card is
    * rendered — so a script-only harness test needs no tracker at all. When
    * present, the harness re-renders the single review card each time it opens a
-   * gate (ADR-0004), reusing the run's recorded {@link RunState.card}.
+   * gate (ADR-0004), reusing the run's recorded {@link RunState.card}, and polls
+   * that card for reviewer commands to ingest (see {@link readCursor}).
    */
   tracker?: TrackerAdapter;
+  /**
+   * Read the card's cached polling cursor, by card id — a fetch optimization only
+   * (ADR-0006). The harness passes the returned cursor to
+   * {@link TrackerAdapter.readCommands} so a poll skips comments already seen.
+   * Optional and non-canonical: when absent (or returning `undefined`), the
+   * harness polls from the beginning. Correctness never depends on it — duplicate
+   * comments are filtered by comment-id dedup against the log, not the cursor.
+   */
+  readCursor?: (cardId: string) => CommandCursor | undefined;
+  /**
+   * Persist the advanced polling cursor after a poll, by card id. The harness
+   * calls this with the cursor {@link TrackerAdapter.readCommands} returned, so
+   * the next tick can re-poll conditionally. A no-op or a lost write costs only a
+   * redundant fetch, never a double-ingested comment.
+   */
+  writeCursor?: (cardId: string, cursor: CommandCursor) => void;
 }
 
 /**
@@ -97,10 +125,16 @@ export interface TickDeps {
  * @throws if the log has no `run_created` event (an uncreated run can't tick).
  */
 export async function tick(deps: TickDeps): Promise<void> {
-  const { workflow, log, executor, runDir, tracker } = deps;
+  const { workflow, log, executor, runDir, tracker, readCursor, writeCursor } =
+    deps;
   const now = deps.now ?? (() => new Date().toISOString());
 
   for (;;) {
+    // Ingest reviewer commands BEFORE the fold so a `/approve` left between ticks
+    // drives this very iteration's `decide`. Appends one `command_received` per
+    // new comment id; a re-poll of an already-ingested comment is a no-op.
+    await ingestCommands(workflow, log, tracker, readCursor, writeCursor, now);
+
     const events = log.read();
     const runId = runIdOf(events);
 
@@ -195,6 +229,83 @@ export async function tick(deps: TickDeps): Promise<void> {
     }
     return;
   }
+}
+
+/**
+ * Ingest reviewer commands off the run's tracker card into the event log
+ * (ADR-0006, AC1–AC2/AC5/AC6). Polls the card for new comments, parses each into
+ * a candidate command, and appends one `command_received` per *new* comment id —
+ * mirroring the manual CLI path in `../cli/command.ts`: the gate id comes from the
+ * folded open gate, the comment id is the candidate's (the canonical idempotency
+ * key), and the actor/decision/feedback are the reviewer's.
+ *
+ * Exactly-once is keyed on the comment id already in the log, never on the cursor:
+ * the set of ingested comment ids is rebuilt from the log on every poll, so a lost
+ * or corrupt `.cursor.json` only costs a redundant fetch — the same comment id is
+ * filtered out and never appended twice (AC2/AC5). The engine's own comments (gate
+ * prompts, authored as the {@link BOT_ACTOR}) are skipped so they can never be
+ * re-ingested as commands (AC6).
+ *
+ * A no-op when there is no tracker or the run has no card yet (a script-only run
+ * never polls), so this stays invisible to gateless harness paths. The cursor is
+ * a fetch optimization only: read via {@link TickDeps.readCursor}, advanced via
+ * {@link TickDeps.writeCursor}, both optional.
+ */
+async function ingestCommands(
+  workflow: WorkflowDefinition,
+  log: EventLog,
+  tracker: TrackerAdapter | undefined,
+  readCursor: ((cardId: string) => CommandCursor | undefined) | undefined,
+  writeCursor: ((cardId: string, cursor: CommandCursor) => void) | undefined,
+  now: () => string,
+): Promise<void> {
+  if (tracker === undefined) return;
+  const events = log.read();
+  const state = foldRunState(workflow, events);
+  const card = state.card;
+  if (card === undefined) return;
+
+  const cardRef: CardRef = { id: card.id, url: card.url };
+  const cursor = readCursor?.(card.id);
+  const result = await tracker.readCommands(cardRef, cursor);
+
+  // Dedup key: comment ids already recorded as `command_received` facts in the
+  // log. Rebuilt from the log every poll, so correctness survives a lost cursor.
+  const ingested = new Set(
+    events.filter((e) => e.type === 'command_received').map((e) => e.commentId),
+  );
+
+  const runId = runIdOf(events);
+  let seq = events.length;
+  for (const candidate of parseCommands(result.comments)) {
+    // Skip the engine's own comments (AC6) and any comment already ingested
+    // (AC2/AC5) — the gate prompt the harness posts must never become a command.
+    if (candidate.actor === BOT_ACTOR) continue;
+    if (ingested.has(candidate.commentId)) continue;
+    ingested.add(candidate.commentId);
+
+    log.append({
+      type: 'command_received',
+      runId,
+      seq,
+      ts: now(),
+      gateId: state.openGate?.gateId ?? '',
+      commentId: candidate.commentId,
+      actor: candidate.actor,
+      decision: candidate.decision,
+      ...(candidate.feedback !== undefined && { feedback: candidate.feedback }),
+    });
+    seq += 1;
+  }
+
+  // Advance the cursor only AFTER the commands are durably appended (ADR-0006:
+  // crash-safe by replay, like step_dispatched-before-execute). Persisting the
+  // cursor before the append would, on a crash between the two, advance the
+  // watermark past comments that never reached the log — a 304/empty re-poll
+  // would then drop them for good. With this order a crash leaves the cursor
+  // un-advanced, so the next poll re-reads the comments and comment-id dedup
+  // absorbs the replay. A lost cursor still only costs a redundant fetch.
+  writeCursor?.(card.id, result.cursor);
 }
 
 /**

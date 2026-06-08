@@ -59,6 +59,17 @@ export interface RenderReviewCardInput {
 }
 
 /**
+ * The actor a tracker stamps on the engine's *own* comments (gate prompts, the
+ * rendered review card, coordinator notes) — the bot identity, as opposed to a
+ * human reviewer. Ingestion excludes comments authored by this actor so the
+ * engine never re-ingests its own output as a command (CONTEXT.md → Command;
+ * ADR-0006, AC6). It is the GitHub `workmachine` bot/label name; the in-memory
+ * fake stamps the same value on `postComment`, so the exclusion is provider-
+ * agnostic and single-sourced here at the seam.
+ */
+export const BOT_ACTOR = 'workmachine';
+
+/**
  * One raw comment read off a card. The `id` is the tracker's stable comment id —
  * the canonical idempotency key the event log dedups on (CONTEXT.md → Command;
  * ADR-0006), not the cursor. The adapter returns comments verbatim; turning a
