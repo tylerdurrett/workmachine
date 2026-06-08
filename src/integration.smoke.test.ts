@@ -9,6 +9,7 @@ import type { CliDeps } from './cli/index.js';
 import { main } from './cli/index.js';
 import { foldRunState } from './orchestrator/index.js';
 import { JsonlEventLog, foldRun, resolveRunDir } from './run/index.js';
+import { FakeTracker } from './tracker/index.js';
 import { loadWorkflowFile } from './workflow/index.js';
 
 /**
@@ -58,15 +59,23 @@ describe('integration smoke: gateless spine (create -> tick -> completed)', () =
 
   /** Deps wiring the CLI to a temp runs root, fixed clock/rand, capturing log. */
   function deps(): Partial<CliDeps> {
-    return { runsRoot, now, rand, log: (line) => lines.push(line) };
+    return {
+      runsRoot,
+      now,
+      rand,
+      makeTracker: () => new FakeTracker(),
+      log: (line) => lines.push(line),
+    };
   }
 
   beforeEach(async () => {
     runsRoot = await mkdtemp(join(tmpdir(), 'wm-smoke-'));
     lines = [];
+    process.env.WORKMACHINE_SANDBOX_REPO = 'acme/widgets';
   });
 
   afterEach(async () => {
+    delete process.env.WORKMACHINE_SANDBOX_REPO;
     await rm(runsRoot, { recursive: true, force: true });
   });
 
@@ -90,16 +99,18 @@ describe('integration smoke: gateless spine (create -> tick -> completed)', () =
     const layout = resolveRunDir(runsRoot, RUN_ID);
     const events = new JsonlEventLog(layout.eventsLogPath).read();
 
-    // The full gateless spine, in order.
+    // The full gateless spine, in order. `card_created` follows `run_created`:
+    // intake opens the run's card before the first tick dispatches a step.
     expect(events.map((e) => e.type)).toEqual([
       'run_created',
+      'card_created',
       'step_dispatched',
       'step_succeeded',
       'run_completed',
     ]);
 
     // The dispatched command is fully resolved — no tokens, real artifact path.
-    const dispatched = events[1];
+    const dispatched = events[2];
     expect(dispatched?.type).toBe('step_dispatched');
     if (dispatched?.type === 'step_dispatched') {
       expect(dispatched.command).not.toMatch(/\{\{/);
@@ -107,7 +118,7 @@ describe('integration smoke: gateless spine (create -> tick -> completed)', () =
     }
 
     // The step recorded exactly one artifact with a real hash and size.
-    const succeeded = events[2];
+    const succeeded = events[3];
     expect(succeeded?.type).toBe('step_succeeded');
     if (succeeded?.type === 'step_succeeded') {
       expect(succeeded.artifacts).toHaveLength(1);
@@ -192,6 +203,7 @@ describe('integration smoke: gated loop (create -> tick -> command -> tick)', ()
       now,
       rand,
       mintCommentId: () => 'comment-1',
+      makeTracker: () => new FakeTracker(),
       log: (line) => lines.push(line),
     };
   }
@@ -236,9 +248,11 @@ describe('integration smoke: gated loop (create -> tick -> command -> tick)', ()
   beforeEach(async () => {
     runsRoot = await mkdtemp(join(tmpdir(), 'wm-smoke-gated-'));
     lines = [];
+    process.env.WORKMACHINE_SANDBOX_REPO = 'acme/widgets';
   });
 
   afterEach(async () => {
+    delete process.env.WORKMACHINE_SANDBOX_REPO;
     await rm(runsRoot, { recursive: true, force: true });
   });
 
@@ -250,6 +264,7 @@ describe('integration smoke: gated loop (create -> tick -> command -> tick)', ()
     // terminal run event, no decision, because no command has arrived yet.
     expect(events.map((e) => e.type)).toEqual([
       'run_created',
+      'card_created',
       'step_dispatched',
       'step_succeeded',
       'gate_opened',
@@ -277,6 +292,7 @@ describe('integration smoke: gated loop (create -> tick -> command -> tick)', ()
     const events = log.read();
     expect(events.map((e) => e.type)).toEqual([
       'run_created',
+      'card_created',
       'step_dispatched',
       'step_succeeded',
       'gate_opened',
@@ -306,6 +322,7 @@ describe('integration smoke: gated loop (create -> tick -> command -> tick)', ()
     const events = log.read();
     expect(events.map((e) => e.type)).toEqual([
       'run_created',
+      'card_created',
       'step_dispatched',
       'step_succeeded',
       'gate_opened',
@@ -406,6 +423,7 @@ describe('integration smoke: feedback loop (request_changes -> tick -> approve -
       now,
       rand,
       mintCommentId: () => 'comment-1',
+      makeTracker: () => new FakeTracker(),
       log: (line) => lines.push(line),
     };
   }
@@ -443,9 +461,11 @@ describe('integration smoke: feedback loop (request_changes -> tick -> approve -
   beforeEach(async () => {
     runsRoot = await mkdtemp(join(tmpdir(), 'wm-smoke-feedback-'));
     lines = [];
+    process.env.WORKMACHINE_SANDBOX_REPO = 'acme/widgets';
   });
 
   afterEach(async () => {
+    delete process.env.WORKMACHINE_SANDBOX_REPO;
     await rm(runsRoot, { recursive: true, force: true });
   });
 
@@ -474,6 +494,7 @@ describe('integration smoke: feedback loop (request_changes -> tick -> approve -
     const afterRevision = log.read();
     expect(afterRevision.map((e) => e.type)).toEqual([
       'run_created',
+      'card_created',
       'step_dispatched',
       'step_succeeded',
       'gate_opened',
@@ -532,6 +553,7 @@ describe('integration smoke: feedback loop (request_changes -> tick -> approve -
     const final = log.read();
     expect(final.map((e) => e.type)).toEqual([
       'run_created',
+      'card_created',
       'step_dispatched',
       'step_succeeded',
       'gate_opened',

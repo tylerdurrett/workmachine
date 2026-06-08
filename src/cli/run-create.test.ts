@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { JsonlEventLog, resolveRunDir } from '../run/index.js';
+import { FakeTracker } from '../tracker/index.js';
 import { runCreate } from './run-create.js';
 
 /**
@@ -29,28 +30,34 @@ steps:
         path: artifacts/out.txt
 `;
 
+const REPO = 'acme/widgets';
+
 describe('runCreate', () => {
   let runsRoot: string;
   let workflowPath: string;
+  let tracker: FakeTracker;
 
   beforeEach(async () => {
     runsRoot = await mkdtemp(join(tmpdir(), 'wm-create-'));
     workflowPath = join(runsRoot, 'workflow.yaml');
     writeFileSync(workflowPath, WORKFLOW_YAML, 'utf8');
+    tracker = new FakeTracker();
   });
 
   afterEach(async () => {
     await rm(runsRoot, { recursive: true, force: true });
   });
 
-  it('scaffolds the run dir and seeds a run_created event', () => {
-    const result = runCreate({
+  it('scaffolds the run dir and seeds run_created then card_created', async () => {
+    const result = await runCreate({
       workflowPath,
       inputs: { msg: 'hi' },
       runId: undefined,
       runsRoot,
       now,
       rand,
+      tracker,
+      repo: REPO,
     });
 
     expect(result.runId).toBe('20260607T120000Z-tiny-smoke-ab12');
@@ -61,7 +68,8 @@ describe('runCreate', () => {
     expect(existsSync(layout.workflowSnapshotPath)).toBe(true);
 
     const events = new JsonlEventLog(layout.eventsLogPath).read();
-    expect(events).toHaveLength(1);
+    expect(events.map((e) => e.type)).toEqual(['run_created', 'card_created']);
+
     const created = events[0];
     expect(created?.type).toBe('run_created');
     if (created?.type === 'run_created') {
@@ -70,37 +78,56 @@ describe('runCreate', () => {
       expect(created.workflowSlug).toBe('tiny-smoke');
       expect(created.inputs).toEqual({ msg: 'hi' });
     }
+
+    const carded = events[1];
+    expect(carded?.type).toBe('card_created');
+    if (carded?.type === 'card_created') {
+      expect(carded.seq).toBe(1);
+      expect(carded.cardId).toBe('card-1');
+      expect(carded.cardUrl).toBe('fake://card/card-1');
+      expect(carded.runIdMarker).toBe('20260607T120000Z-tiny-smoke-ab12');
+      expect(carded.repo).toBe(REPO);
+    }
+
+    // The fake recorded the card with the run-id marker body and label.
+    const card = tracker.cardState('card-1');
+    expect(card?.body).toContain('20260607T120000Z-tiny-smoke-ab12');
+    expect(card?.labels).toEqual(['workmachine']);
   });
 
-  it('creates the runs root lazily when it does not yet exist', () => {
+  it('creates the runs root lazily when it does not yet exist', async () => {
     // On a fresh checkout `runs/` is gitignored and absent; create must make it.
     const freshRoot = join(runsRoot, 'nested', 'runs');
     expect(existsSync(freshRoot)).toBe(false);
 
-    const result = runCreate({
+    const result = await runCreate({
       workflowPath,
       inputs: {},
       runId: undefined,
       runsRoot: freshRoot,
       now,
       rand,
+      tracker,
+      repo: REPO,
     });
 
     expect(existsSync(result.runDir)).toBe(true);
   });
 
-  it('refuses a --run-id override whose dir already exists', () => {
+  it('refuses a --run-id override whose dir already exists', async () => {
     const override = 'fixed-run-id';
-    runCreate({
+    await runCreate({
       workflowPath,
       inputs: {},
       runId: override,
       runsRoot,
       now,
       rand,
+      tracker,
+      repo: REPO,
     });
 
-    expect(() =>
+    await expect(
       runCreate({
         workflowPath,
         inputs: {},
@@ -108,7 +135,9 @@ describe('runCreate', () => {
         runsRoot,
         now,
         rand,
+        tracker,
+        repo: REPO,
       }),
-    ).toThrow(/already exists/);
+    ).rejects.toThrow(/already exists/);
   });
 });

@@ -43,6 +43,15 @@ function header(req: CapturedRequest, name: string): string | undefined {
   return new Headers(headers).get(name) ?? undefined;
 }
 
+/**
+ * Parse a captured request's JSON body. The adapter always sends a JSON string
+ * body, so this narrows the `BodyInit` to the parsed payload for assertions.
+ */
+function jsonBody(req: CapturedRequest | undefined): unknown {
+  const body = req?.init?.body;
+  return typeof body === 'string' ? JSON.parse(body) : undefined;
+}
+
 describe('resolveGitHubConfig', () => {
   it('resolves the repo from opts over the env fallback', () => {
     const config = resolveGitHubConfig(
@@ -138,7 +147,85 @@ describe('GitHubTracker.verifyAccess', () => {
   });
 });
 
-describe('GitHubTracker adapter methods (stubbed this slice)', () => {
+describe('GitHubTracker.createRunCard', () => {
+  const config = { token: 'tok', owner: 'acme', repo: 'widgets' };
+
+  it('POSTs an issue with the workmachine label + run-id marker body and returns the card ref', async () => {
+    const { fetch, calls } = stubFetch(201, {
+      number: 42,
+      html_url: 'https://github.com/acme/widgets/issues/42',
+    });
+    const tracker = new GitHubTracker(config, { fetch });
+
+    const card = await tracker.createRunCard({
+      title: 'Run 20260607T120000Z-tiny-smoke-ab12',
+      body: 'run-id: 20260607T120000Z-tiny-smoke-ab12',
+    });
+
+    expect(card).toEqual({
+      id: '42',
+      url: 'https://github.com/acme/widgets/issues/42',
+    });
+    expect(calls).toHaveLength(1);
+    const [req] = calls;
+    expect(req?.url).toBe('https://api.github.com/repos/acme/widgets/issues');
+    expect(req?.init?.method).toBe('POST');
+    expect(header(req!, 'Content-Type')).toBe('application/json');
+    const payload = jsonBody(req) as {
+      title: string;
+      body: string;
+      labels: string[];
+    };
+    expect(payload.title).toBe('Run 20260607T120000Z-tiny-smoke-ab12');
+    expect(payload.body).toContain('20260607T120000Z-tiny-smoke-ab12');
+    expect(payload.labels).toEqual(['workmachine']);
+  });
+
+  it('merges caller-supplied labels after the workmachine marker', async () => {
+    const { fetch, calls } = stubFetch(201, {
+      number: 7,
+      html_url: 'https://github.com/acme/widgets/issues/7',
+    });
+    const tracker = new GitHubTracker(config, { fetch });
+
+    await tracker.createRunCard({ title: 't', body: 'b', labels: ['extra'] });
+
+    const payload = jsonBody(calls[0]) as { labels: string[] };
+    expect(payload.labels).toEqual(['workmachine', 'extra']);
+  });
+});
+
+describe('GitHubTracker.postComment', () => {
+  const config = { token: 'tok', owner: 'acme', repo: 'widgets' };
+  const card = { id: '42', url: 'https://github.com/acme/widgets/issues/42' };
+
+  it('POSTs a comment to the issue and returns the created comment', async () => {
+    const { fetch, calls } = stubFetch(201, {
+      id: 1001,
+      user: { login: 'octocat' },
+      body: '/approve',
+      created_at: '2026-06-08T12:00:00Z',
+    });
+    const tracker = new GitHubTracker(config, { fetch });
+
+    const comment = await tracker.postComment(card, '/approve');
+
+    expect(comment).toEqual({
+      id: '1001',
+      author: 'octocat',
+      body: '/approve',
+      createdAt: '2026-06-08T12:00:00Z',
+    });
+    const [req] = calls;
+    expect(req?.url).toBe(
+      'https://api.github.com/repos/acme/widgets/issues/42/comments',
+    );
+    expect(req?.init?.method).toBe('POST');
+    expect(jsonBody(req)).toEqual({ body: '/approve' });
+  });
+});
+
+describe('GitHubTracker adapter methods (stubbed for later tasks)', () => {
   const tracker: TrackerAdapter = new GitHubTracker({
     token: 'tok',
     owner: 'acme',
@@ -146,18 +233,12 @@ describe('GitHubTracker adapter methods (stubbed this slice)', () => {
   });
   const card = { id: '1', url: 'https://github.com/acme/widgets/issues/1' };
 
-  it('rejects createRunCard / renderReviewCard / readCommands / postComment', async () => {
-    await expect(
-      tracker.createRunCard({ title: 't', body: 'b' }),
-    ).rejects.toThrow(/not implemented yet \(task #32\)/);
+  it('rejects renderReviewCard (#33) and readCommands (#34)', async () => {
     await expect(tracker.renderReviewCard({ card, body: 'b' })).rejects.toThrow(
       /not implemented yet \(task #33\)/,
     );
     await expect(tracker.readCommands(card)).rejects.toThrow(
       /not implemented yet \(task #34\)/,
-    );
-    await expect(tracker.postComment(card, 'b')).rejects.toThrow(
-      /not implemented yet \(task #32\)/,
     );
   });
 });

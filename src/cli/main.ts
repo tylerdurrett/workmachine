@@ -4,6 +4,11 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import type { GateDecision } from '../domain/index.js';
+import {
+  GitHubTracker,
+  type TrackerAdapter,
+  resolveGitHubConfig,
+} from '../tracker/index.js';
 import { runCommand } from './command.js';
 import { runCreate } from './run-create.js';
 import { runTick } from './tick.js';
@@ -19,7 +24,7 @@ import { runTick } from './tick.js';
  * which makes the minted run id deterministic and the end-to-end flow assertable.
  *
  * Commands:
- *  - `run create <workflowPath> [--input k=v ...] [--run-id <id>]`
+ *  - `run create <workflowPath> [--input k=v ...] [--run-id <id>] [--repo owner/name]`
  *  - `tick <runId>`
  *  - `command <runId> <decision> [text]`
  */
@@ -52,6 +57,13 @@ export interface CliDeps {
    * minter so the appended `command_received` is fully determined.
    */
   mintCommentId: () => string;
+  /**
+   * Build the tracker the run's card opens on, given the resolved `owner/name`
+   * repo. Defaults to a live {@link GitHubTracker} from
+   * {@link resolveGitHubConfig}; tests inject a {@link FakeTracker} so intake
+   * runs offline (no live GitHub).
+   */
+  makeTracker: (repo: string) => TrackerAdapter;
   /** Output sink. Defaults to `console.log`. */
   log: (line: string) => void;
 }
@@ -65,6 +77,17 @@ function defaultRand(): string {
   return suffix;
 }
 
+/**
+ * Build the live tracker for a resolved repo: a {@link GitHubTracker} over the
+ * config resolved from `process.env` plus the operator-supplied repo (ADR-0008 —
+ * the engine hard-codes no tracker repo). The repo string was already validated
+ * as `owner/name` when it was resolved, so passing it through here re-resolves
+ * the same config rather than reaching for the env fallback.
+ */
+function defaultMakeTracker(repo: string): TrackerAdapter {
+  return new GitHubTracker(resolveGitHubConfig(process.env, { repo }));
+}
+
 /** Fill in production defaults for any dependency the caller did not inject. */
 function resolveDeps(deps?: Partial<CliDeps>): CliDeps {
   return {
@@ -72,6 +95,7 @@ function resolveDeps(deps?: Partial<CliDeps>): CliDeps {
     now: deps?.now ?? (() => new Date().toISOString()),
     rand: deps?.rand ?? defaultRand,
     mintCommentId: deps?.mintCommentId ?? (() => randomUUID()),
+    makeTracker: deps?.makeTracker ?? defaultMakeTracker,
     log:
       deps?.log ??
       ((line) => {
@@ -117,7 +141,8 @@ export async function main(
   argv: string[],
   deps?: Partial<CliDeps>,
 ): Promise<void> {
-  const { runsRoot, now, rand, mintCommentId, log } = resolveDeps(deps);
+  const { runsRoot, now, rand, mintCommentId, makeTracker, log } =
+    resolveDeps(deps);
   const [command, ...rest] = argv;
 
   if (command === 'run' && rest[0] === 'create') {
@@ -127,21 +152,34 @@ export async function main(
       options: {
         input: { type: 'string', multiple: true },
         'run-id': { type: 'string' },
+        repo: { type: 'string' },
       },
     });
     const workflowPath = positionals[0];
     if (workflowPath === undefined) {
       throw new Error(
-        'usage: workmachine run create <workflowPath> [--input k=v ...] [--run-id <id>]',
+        'usage: workmachine run create <workflowPath> [--input k=v ...] [--run-id <id>] [--repo owner/name]',
       );
     }
-    const { runId } = runCreate({
+    // The card's repo is operator-supplied per run via `--repo`, falling back to
+    // the local-dev `WORKMACHINE_SANDBOX_REPO` (ADR-0008). It is recorded on
+    // `card_created` so the run is self-describing; the live adapter
+    // (`makeTracker`) re-resolves it alongside the token via resolveGitHubConfig.
+    const repo = values.repo ?? process.env.WORKMACHINE_SANDBOX_REPO;
+    if (repo === undefined || repo === '') {
+      throw new Error(
+        'no target repo: pass --repo owner/name or set WORKMACHINE_SANDBOX_REPO',
+      );
+    }
+    const { runId } = await runCreate({
       workflowPath,
       inputs: parseInputs(values.input ?? []),
       runId: values['run-id'],
       runsRoot,
       now,
       rand,
+      tracker: makeTracker(repo),
+      repo,
     });
     log(`created run ${runId}`);
     log(`next: workmachine tick ${runId}`);
@@ -178,7 +216,7 @@ export async function main(
   }
 
   throw new Error(
-    'usage: workmachine <run create <workflowPath> [--input k=v ...] [--run-id <id>] | tick <runId> | command <runId> <approve|request_changes|reject> [text]>',
+    'usage: workmachine <run create <workflowPath> [--input k=v ...] [--run-id <id>] [--repo owner/name] | tick <runId> | command <runId> <approve|request_changes|reject> [text]>',
   );
 }
 

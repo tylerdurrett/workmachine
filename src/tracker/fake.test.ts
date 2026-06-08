@@ -18,6 +18,25 @@ describe('FakeTracker', () => {
     expect(second).toEqual({ id: 'card-2', url: 'fake://card/card-2' });
   });
 
+  it('round-trips the run-id body marker and workmachine label through cardState', async () => {
+    // Intake (#32) opens the card with the run id in the body and the
+    // workmachine label; the fake must round-trip both so the seam's logic is
+    // provable offline (no live GitHub).
+    const tracker = new FakeTracker();
+    const runId = '20260607T120000Z-tiny-smoke-ab12';
+
+    const card = await tracker.createRunCard({
+      title: `Run ${runId}`,
+      body: `run-id: ${runId}`,
+      labels: ['workmachine'],
+    });
+
+    const state = tracker.cardState(card.id);
+    expect(state?.title).toBe(`Run ${runId}`);
+    expect(state?.body).toContain(runId);
+    expect(state?.labels).toEqual(['workmachine']);
+  });
+
   it('round-trips a comment: create, post, read it back, re-poll is empty', async () => {
     const tracker = new FakeTracker({ now: () => '2026-06-08T12:00:00.000Z' });
     const card = await tracker.createRunCard({ title: 'Run', body: 'state' });

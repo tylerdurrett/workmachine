@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type {
   CardRef,
+  CreateRunCardInput,
   ReadCommandsResult,
   TrackerAdapter,
   TrackerComment,
@@ -13,12 +14,12 @@ import type {
  * polling (#34) needs explicit ETag conditional requests, so the HTTP path is
  * kept transparent rather than buried in a client library.
  *
- * This slice (#31) is the *skeleton*: config resolution, the authenticated HTTP
- * client, and a `verifyAccess` smoke path that proves live reachability. The four
- * adapter methods are stubbed — their behavior (the run-id body marker, the
- * `workmachine` label, ETag cursor semantics) is decided by #32/#33/#34, and
- * implementing them here would pre-empt those decisions. The human-watched live
- * demo against the sandbox repo is deferred to its own task.
+ * The skeleton (#31) stood up config resolution, the authenticated HTTP client,
+ * and a `verifyAccess` smoke path that proves live reachability. Intake (#32)
+ * implements `createRunCard` (open the issue carrying the run-id body marker and
+ * the `workmachine` label) and `postComment`; `renderReviewCard` (#33) and the
+ * ETag-cursor `readCommands` (#34) stay stubbed until their tasks own them. The
+ * human-watched live demo against the sandbox repo is deferred to its own task.
  *
  * GitHub-specific naming stays inside this file (CONTEXT.md → Language): the
  * interface speaks card / comment / command / cursor; only here do those map onto
@@ -55,6 +56,29 @@ interface GitHubTrackerDeps {
 
 /** Shape of the `GET /repos/{owner}/{repo}` response fields we read. */
 const repoSchema = z.object({ full_name: z.string() });
+
+/**
+ * Shape of the issue fields we read off a created issue (`POST .../issues`): the
+ * `number` becomes the {@link CardRef.id} and `html_url` its human-openable url.
+ */
+const issueSchema = z.object({
+  number: z.number(),
+  html_url: z.string(),
+});
+
+/** Shape of the comment fields we read off a created comment (`POST .../comments`). */
+const commentSchema = z.object({
+  id: z.number(),
+  user: z.object({ login: z.string() }).nullable(),
+  body: z.string().nullable(),
+  created_at: z.string(),
+});
+
+/**
+ * The label the GitHub adapter tags every run card with, so a run's issues are
+ * findable as machine-opened (ADR-0008; intake task #32).
+ */
+const WORKMACHINE_LABEL = 'workmachine';
 
 /**
  * Resolve the GitHub config from the environment and an optional repo override.
@@ -127,12 +151,22 @@ export class GitHubTracker implements TrackerAdapter {
     return { fullName: parsed.full_name };
   }
 
-  // The four adapter methods are intentionally unimplemented in this slice
-  // (#31). Their behavior is owned by later tasks; stubbing avoids pre-empting
-  // those decisions while the seam and the live client are stood up.
-
-  createRunCard(): Promise<CardRef> {
-    return notImplemented('createRunCard', 32);
+  /**
+   * Open the run's card as a GitHub issue: `POST /repos/{owner}/{repo}/issues`
+   * with the rendered title/body and the `workmachine` label. The run-id
+   * idempotency marker rides in `input.body` (rendered by the caller), so the
+   * card carries the run id that later anchors it. Returns the issue number (as
+   * the card id) and its `html_url`.
+   */
+  async createRunCard(input: CreateRunCardInput): Promise<CardRef> {
+    const { owner, repo } = this.config;
+    const json = await this.request('POST', `/repos/${owner}/${repo}/issues`, {
+      title: input.title,
+      body: input.body,
+      labels: [WORKMACHINE_LABEL, ...(input.labels ?? [])],
+    });
+    const issue = issueSchema.parse(json);
+    return { id: String(issue.number), url: issue.html_url };
   }
 
   renderReviewCard(): Promise<void> {
@@ -143,8 +177,25 @@ export class GitHubTracker implements TrackerAdapter {
     return notImplemented('readCommands', 34);
   }
 
-  postComment(): Promise<TrackerComment> {
-    return notImplemented('postComment', 32);
+  /**
+   * Post a comment to the card's issue: `POST .../issues/{id}/comments`. Returns
+   * the created comment, including its provider-assigned id — the canonical
+   * idempotency key the event log dedups on (ADR-0006).
+   */
+  async postComment(card: CardRef, body: string): Promise<TrackerComment> {
+    const { owner, repo } = this.config;
+    const json = await this.request(
+      'POST',
+      `/repos/${owner}/${repo}/issues/${card.id}/comments`,
+      { body },
+    );
+    const comment = commentSchema.parse(json);
+    return {
+      id: String(comment.id),
+      author: comment.user?.login ?? '',
+      body: comment.body ?? '',
+      createdAt: comment.created_at,
+    };
   }
 
   /**

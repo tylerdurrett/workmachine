@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { JsonlEventLog, resolveRunDir } from '../run/index.js';
+import { FakeTracker } from '../tracker/index.js';
 import { runCreate } from './run-create.js';
 import { runTick } from './tick.js';
 
@@ -42,13 +43,15 @@ describe('runTick', () => {
   });
 
   it('drives a created run to completion and is idempotent', async () => {
-    const { runId, runDir } = runCreate({
+    const { runId, runDir } = await runCreate({
       workflowPath,
       inputs: {},
       runId: undefined,
       runsRoot,
       now,
       rand,
+      tracker: new FakeTracker(),
+      repo: 'acme/widgets',
     });
 
     await runTick({ runId, runsRoot, now });
@@ -58,6 +61,7 @@ describe('runTick', () => {
     const events = log.read();
     expect(events.map((e) => e.type)).toEqual([
       'run_created',
+      'card_created',
       'step_dispatched',
       'step_succeeded',
       'run_completed',

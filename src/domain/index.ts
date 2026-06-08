@@ -1,5 +1,6 @@
 export type { ArtifactIndexEntry } from './artifacts.js';
 export type {
+  CardCreatedEvent,
   CommandReceivedEvent,
   EngineEvent,
   EngineEventType,
@@ -17,6 +18,7 @@ export type {
 export type {
   Decision,
   OpenGate,
+  RunCard,
   RunState,
   RunStatus,
   StepState,
