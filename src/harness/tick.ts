@@ -3,9 +3,9 @@ import type { Executor } from '../executor/index.js';
 import { decide, foldRunState } from '../orchestrator/index.js';
 import type { EventLog } from '../run/index.js';
 import {
-  BOT_ACTOR,
   type CardRef,
   type CommandCursor,
+  isBotComment,
   parseCommands,
   type TrackerAdapter,
 } from '../tracker/index.js';
@@ -243,8 +243,9 @@ export async function tick(deps: TickDeps): Promise<void> {
  * the set of ingested comment ids is rebuilt from the log on every poll, so a lost
  * or corrupt `.cursor.json` only costs a redundant fetch — the same comment id is
  * filtered out and never appended twice (AC2/AC5). The engine's own comments (gate
- * prompts, authored as the {@link BOT_ACTOR}) are skipped so they can never be
- * re-ingested as commands (AC6).
+ * prompts) are recognized by their body {@link isBotComment} marker and skipped so
+ * they can never be re-ingested as commands (AC6) — the reviewer's author is
+ * recorded as an audit fact, never the exclusion key.
  *
  * A no-op when there is no tracker or the run has no card yet (a script-only run
  * never polls), so this stays invisible to gateless harness paths. The cursor is
@@ -275,12 +276,15 @@ async function ingestCommands(
     events.filter((e) => e.type === 'command_received').map((e) => e.commentId),
   );
 
+  // Drop the engine's own comments (AC6) by their body marker before parsing —
+  // the gate prompt the harness posts must never become a command. Author is not
+  // the signal: the live adapter stamps it with the token's own login.
+  const reviewerComments = result.comments.filter((c) => !isBotComment(c.body));
+
   const runId = runIdOf(events);
   let seq = events.length;
-  for (const candidate of parseCommands(result.comments)) {
-    // Skip the engine's own comments (AC6) and any comment already ingested
-    // (AC2/AC5) — the gate prompt the harness posts must never become a command.
-    if (candidate.actor === BOT_ACTOR) continue;
+  for (const candidate of parseCommands(reviewerComments)) {
+    // Skip any comment already ingested (AC2/AC5) so it is never appended twice.
     if (ingested.has(candidate.commentId)) continue;
     ingested.add(candidate.commentId);
 
