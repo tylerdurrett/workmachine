@@ -156,12 +156,26 @@ const LAND_SCHEMA = {
   },
 }
 
+// Worktree branch protocol — the root-cause fix for the cross-worktree branch collision.
+// Every task's four stages (Prep/Implement/Review/Land) run in SEPARATE fresh worktrees and hand the
+// branch off through origin. Git allows a branch to be checked out BY NAME in only one worktree at a
+// time, and a stage's worktree isn't reliably torn down before the next stage starts — so a lingering
+// sibling that holds the branch name strands the next stage ("fatal: '<branch>' is already used by
+// worktree ..."). The fix: NO stage ever holds the branch by name. Every stage works in DETACHED HEAD
+// (HEAD pointing straight at the commit, not via the branch ref) and publishes with an explicit
+// refspec. Detached HEADs at the same commit never collide, so the one-branch-per-worktree rule can
+// never fire. This also immunises against a fresh worktree starting on an unrelated base commit: the
+// fetch+detach lands every stage on the right tree regardless of where its worktree started.
+const WORKTREE_PROTOCOL = (branch) =>
+  `WORKTREE BRANCH PROTOCOL (critical — do not deviate): your worktree is fresh and may start on an unrelated commit. NEVER run \`git checkout ${branch}\` / \`git switch ${branch}\` — a named checkout locks the branch and the sibling stages in other worktrees must be able to read it (git forbids the same branch in two worktrees). Always work in DETACHED HEAD: get the code with \`git fetch origin ${branch} && git checkout --detach FETCH_HEAD\`, and publish commits with \`git push origin HEAD:${branch}\`.`
+
 function prepPrompt(task) {
   const deps = (task.dependsOn || []).filter((d) => byNum.has(d))
   return [
     `You are the PREP stage of a /batch run for GitHub issue #${task.number} ("${task.title}"), in your own isolated git worktree.`,
     ``,
-    `Follow the /execute skill, Steps 1–6, per its "Running under /batch" section (Prep row): validate labels, walk the parent chain to resolve the base branch, read the brief and any contract-updating parent comments, explore the codebase, and form the numbered sub-section plan. Do NOT halt for approval (skip the Step 5 halt). Create the feature branch off the resolved base (Step 6), then push it empty to origin: \`git push -u origin <branch>\`.`,
+    `Follow the /execute skill, Steps 1–6, per its "Running under /batch" section (Prep row): validate labels, walk the parent chain to resolve the base branch, read the brief and any contract-updating parent comments, explore the codebase, and form the numbered sub-section plan. Do NOT halt for approval (skip the Step 5 halt).`,
+    `\nCreate the feature branch (Step 6), but do NOT let your worktree hold it by name — sibling stages run in separate worktrees and git forbids the same branch being checked out twice. So instead of \`git checkout -b <branch>\`, resolve the base, detach onto it (\`git fetch origin <resolved-base> && git checkout --detach FETCH_HEAD\`), and create the branch ON ORIGIN ONLY with \`git push origin HEAD:refs/heads/<branch>\`. Do NOT create a local branch ref of any kind.`,
     deps.length
       ? `\nThis task depends on #${deps.join(', #')}, already squash-merged into the integration branch. Fetch the base branch fresh before branching so it includes their code.`
       : ``,
@@ -176,7 +190,7 @@ function implPrompt(task, prep) {
   return [
     `You are the IMPLEMENT stage of a /batch run for GitHub issue #${task.number} ("${task.title}"), in your own isolated git worktree. You are /execute Step 7's clean implementation agent — you do NOT need the base-branch bookkeeping, only the plan below.`,
     ``,
-    `Branch: \`${prep.branch}\` (already on origin, based on \`${prep.baseBranch}\`). Fetch and check it out: \`git fetch origin ${prep.branch} && git checkout ${prep.branch}\`.`,
+    `Branch: \`${prep.branch}\` (already on origin, based on \`${prep.baseBranch}\`). ${WORKTREE_PROTOCOL(prep.branch)}`,
     ``,
     `The contract / brief:`,
     prep.brief || '(see issue #' + task.number + ')',
@@ -184,7 +198,7 @@ function implPrompt(task, prep) {
     `The plan — implement each sub-section, in order, as exactly one commit:`,
     ...(prep.plan || []).map((s, i) => `  ${i + 1}. ${s.title}${s.files && s.files.length ? ` [${s.files.join(', ')}]` : ''}${s.notes ? ` — ${s.notes}` : ''}`),
     ``,
-    `For each sub-section: implement → \`pnpm typecheck\` → \`pnpm lint:fix\` → \`pnpm format:fix\` → run /simplify on the changes → stage and commit with \`<type>(<scope>): <sub-section title>\`. One commit per sub-section — do not bundle. Then push all commits: \`git push origin ${prep.branch}\`.`,
+    `For each sub-section: implement → \`pnpm typecheck\` → \`pnpm lint:fix\` → \`pnpm format:fix\` → run /simplify on the changes → stage and commit with \`<type>(<scope>): <sub-section title>\`. One commit per sub-section — do not bundle. Then push all commits via refspec (you are in detached HEAD): \`git push origin HEAD:${prep.branch}\`.`,
     `Do NOT open a PR, touch labels, or merge. If you hit a blocker, set done:false and return it.`,
     ``,
     `Return: done, commits (one line each), deviations, blocker.`,
@@ -195,13 +209,13 @@ function reviewPrompt(task, prep, mustShip) {
   return [
     `You are the REVIEW stage of a /batch run for GitHub issue #${task.number} ("${task.title}"), in your own isolated git worktree. You did NOT write this code — review it independently.`,
     ``,
-    `Branch \`${prep.branch}\` (based on \`${prep.baseBranch}\`) carries the implementation on origin. Fetch and check it out: \`git fetch origin ${prep.branch} && git checkout ${prep.branch}\`.`,
+    `Branch \`${prep.branch}\` (based on \`${prep.baseBranch}\`) carries the implementation on origin. ${WORKTREE_PROTOCOL(prep.branch)}`,
     ``,
     `Run \`/code-review high\` over this branch's diff against \`${prep.baseBranch}\`. Classify each finding:`,
     `  - BLOCKING — a correctness bug, logic error, or contract violation introduced by this diff.`,
     `  - cleanup — a non-blocking simplification / efficiency / style improvement.`,
     ``,
-    `If there are any BLOCKING findings, fix them in place (you may use \`/code-review --fix\`, or edit by hand), then \`pnpm typecheck\` → \`pnpm lint:fix\` → \`pnpm format:fix\`, commit with \`fix(review): address code-review findings\`, and \`git push origin ${prep.branch}\`. Then re-run \`/code-review high\` ONCE more to recount. Do not loop further — report whatever blocking findings still survive that single fix pass.`,
+    `If there are any BLOCKING findings, fix them in place (you may use \`/code-review --fix\`, or edit by hand), then \`pnpm typecheck\` → \`pnpm lint:fix\` → \`pnpm format:fix\`, commit with \`fix(review): address code-review findings\`, and push via refspec (you are in detached HEAD): \`git push origin HEAD:${prep.branch}\`. Then re-run \`/code-review high\` ONCE more to recount. Do not loop further — report whatever blocking findings still survive that single fix pass.`,
     ``,
     `Do NOT open a PR, change labels, merge, or ship.`,
     mustShip
@@ -220,7 +234,7 @@ function landPrompt(task, prep, { canShip, mustShip, review }) {
   const lines = [
     `You are the LAND stage of a /batch run for GitHub issue #${task.number} ("${task.title}"), in your own isolated git worktree.`,
     ``,
-    `Branch \`${prep.branch}\` (based on \`${prep.baseBranch}\`) carries the finished, independently code-reviewed work on origin. Fetch and check it out, then follow the /execute skill's Step 7-review, Step 8, and Step 9:`,
+    `Branch \`${prep.branch}\` (based on \`${prep.baseBranch}\`) carries the finished, independently code-reviewed work on origin. ${WORKTREE_PROTOCOL(prep.branch)} Then follow the /execute skill's Step 7-review, Step 8, and Step 9:`,
     `  - Review the diff against \`${prep.baseBranch}\`: one commit per sub-section (plus an optional \`fix(review):\` commit from the Review stage), on-contract, no drift. Re-run \`pnpm typecheck\` (and \`pnpm test\` if the plan calls for it).`,
     `  - Step 8: re-read the agent brief on #${task.number} and verify every acceptance criterion first-hand; this populates the PR test plan.`,
     `  - Step 9: open the PR (\`Closes #${task.number}\` only when the base is main; otherwise note the integration target).${findingsNote}`,
