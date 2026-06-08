@@ -196,14 +196,17 @@ const GATED_RUN_ID = '20260607T120000Z-tiny-smoke-gated-ab12';
 describe('integration smoke: gated loop (create -> tick -> command -> tick)', () => {
   let runsRoot: string;
   let lines: string[];
+  let tracker: FakeTracker;
 
+  // One tracker shared across create + tick (production hits the same repo): the
+  // card opened at create is the card the gate-open tick re-renders into.
   function deps(): Partial<CliDeps> {
     return {
       runsRoot,
       now,
       rand,
       mintCommentId: () => 'comment-1',
-      makeTracker: () => new FakeTracker(),
+      makeTracker: () => tracker,
       log: (line) => lines.push(line),
     };
   }
@@ -248,6 +251,7 @@ describe('integration smoke: gated loop (create -> tick -> command -> tick)', ()
   beforeEach(async () => {
     runsRoot = await mkdtemp(join(tmpdir(), 'wm-smoke-gated-'));
     lines = [];
+    tracker = new FakeTracker();
     process.env.WORKMACHINE_SANDBOX_REPO = 'acme/widgets';
   });
 
@@ -416,14 +420,17 @@ const REVISION_NOTE = 'say it louder';
 describe('integration smoke: feedback loop (request_changes -> tick -> approve -> tick)', () => {
   let runsRoot: string;
   let lines: string[];
+  let tracker: FakeTracker;
 
+  // One tracker shared across create + tick (production hits the same repo): the
+  // request_changes loop re-renders the SAME card with the revision thread.
   function deps(): Partial<CliDeps> {
     return {
       runsRoot,
       now,
       rand,
       mintCommentId: () => 'comment-1',
-      makeTracker: () => new FakeTracker(),
+      makeTracker: () => tracker,
       log: (line) => lines.push(line),
     };
   }
@@ -461,6 +468,7 @@ describe('integration smoke: feedback loop (request_changes -> tick -> approve -
   beforeEach(async () => {
     runsRoot = await mkdtemp(join(tmpdir(), 'wm-smoke-feedback-'));
     lines = [];
+    tracker = new FakeTracker();
     process.env.WORKMACHINE_SANDBOX_REPO = 'acme/widgets';
   });
 

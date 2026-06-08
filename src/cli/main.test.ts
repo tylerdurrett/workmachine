@@ -158,14 +158,18 @@ describe('main command dispatch (manual gate command)', () => {
   let runsRoot: string;
   let workflowPath: string;
   let lines: string[];
+  let tracker: FakeTracker;
 
+  // One tracker shared across `run create` and `tick` invocations, mirroring
+  // production where both hit the same repo: `create` opens the card and `tick`
+  // re-renders into it (the review-card projection on gate_opened, ADR-0004).
   function deps(): Partial<CliDeps> {
     return {
       runsRoot,
       now,
       rand,
       mintCommentId: () => 'comment-1',
-      makeTracker: () => new FakeTracker(),
+      makeTracker: () => tracker,
       log: (line) => lines.push(line),
     };
   }
@@ -175,6 +179,7 @@ describe('main command dispatch (manual gate command)', () => {
     workflowPath = join(runsRoot, 'workflow.yaml');
     writeFileSync(workflowPath, GATED_WORKFLOW_YAML, 'utf8');
     lines = [];
+    tracker = new FakeTracker();
     process.env.WORKMACHINE_SANDBOX_REPO = SANDBOX_REPO;
   });
 
