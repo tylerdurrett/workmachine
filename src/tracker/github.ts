@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { markBotComment } from './types.js';
 import type {
   CardRef,
   CommandCursor,
@@ -241,16 +242,19 @@ export class GitHubTracker implements TrackerAdapter {
   }
 
   /**
-   * Post a comment to the card's issue: `POST .../issues/{id}/comments`. Returns
-   * the created comment, including its provider-assigned id — the canonical
-   * idempotency key the event log dedups on (ADR-0006).
+   * Post a comment to the card's issue: `POST .../issues/{id}/comments`. The
+   * outgoing body is stamped with the {@link markBotComment} marker so ingestion
+   * recognizes it as the engine's own and never re-ingests it as a command
+   * (ADR-0006, AC6) — author-matching can't, since GitHub stamps the author with
+   * the token's own login. Returns the created comment, including its
+   * provider-assigned id — the canonical idempotency key the event log dedups on.
    */
   async postComment(card: CardRef, body: string): Promise<TrackerComment> {
     const { owner, repo } = this.config;
     const json = await this.request(
       'POST',
       `/repos/${owner}/${repo}/issues/${card.id}/comments`,
-      { body },
+      { body: markBotComment(body) },
     );
     return toTrackerComment(commentSchema.parse(json));
   }

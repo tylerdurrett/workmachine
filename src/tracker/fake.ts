@@ -1,4 +1,4 @@
-import { BOT_ACTOR } from './types.js';
+import { markBotComment } from './types.js';
 import type {
   CardRef,
   CommandCursor,
@@ -28,10 +28,14 @@ import type {
 export class FakeTracker implements TrackerAdapter {
   /**
    * Author stamped on comments the adapter itself posts (gate prompts, notes).
-   * It is the shared {@link BOT_ACTOR} so ingestion's bot-exclusion (ADR-0006,
-   * AC6) recognizes the fake's own comments exactly as it does the live adapter's.
+   * Deliberately a realistic non-bot login, NOT a fixed `workmachine` handle:
+   * the live GitHub adapter stamps a comment's author with the token's own login
+   * (e.g. `tylerdurrett`), never a magic bot actor, so the fake must do the same.
+   * Self-recognition rides on the body marker ({@link markBotComment}), never the
+   * author — a fake that excluded by a magic author would prove an exclusion the
+   * live adapter can't reproduce (ADR-0006, AC6).
    */
-  private static readonly DEFAULT_AUTHOR = BOT_ACTOR;
+  private static readonly DEFAULT_AUTHOR = 'workmachine-app';
 
   /** Stored cards, keyed by minted card id. */
   private readonly cards = new Map<string, StoredCard>();
@@ -96,7 +100,9 @@ export class FakeTracker implements TrackerAdapter {
   }
 
   postComment(card: CardRef, body: string): Promise<TrackerComment> {
-    return this.append(card, body, FakeTracker.DEFAULT_AUTHOR);
+    // Stamp the bot marker (like the live adapter) so ingestion recognizes the
+    // engine's own comments by body, not author (ADR-0006, AC6).
+    return this.append(card, markBotComment(body), FakeTracker.DEFAULT_AUTHOR);
   }
 
   /**

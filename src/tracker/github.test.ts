@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { GitHubTracker, resolveGitHubConfig } from './github.js';
+import { BOT_COMMENT_MARKER, isBotComment } from './types.js';
 import type { TrackerAdapter } from './types.js';
 
 /**
@@ -224,7 +225,25 @@ describe('GitHubTracker.postComment', () => {
       'https://api.github.com/repos/acme/widgets/issues/42/comments',
     );
     expect(req?.init?.method).toBe('POST');
-    expect(jsonBody(req)).toEqual({ body: '/approve' });
+  });
+
+  it('stamps the bot-comment marker into the outgoing body', async () => {
+    const { fetch, calls } = stubFetch(201, {
+      id: 1001,
+      user: { login: 'tylerdurrett' },
+      body: '/approve',
+      created_at: '2026-06-08T12:00:00Z',
+    });
+    const tracker = new GitHubTracker(config, { fetch });
+
+    await tracker.postComment(card, '/approve');
+
+    // The live adapter must stamp the marker so ingestion recognizes the engine's
+    // own comment by body — author-matching can't, since GitHub stamps the author
+    // with the token's own login (here, tylerdurrett).
+    const body = jsonBody(calls[0]) as { body: string };
+    expect(body.body).toContain(BOT_COMMENT_MARKER);
+    expect(isBotComment(body.body)).toBe(true);
   });
 });
 

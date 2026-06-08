@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseCommands } from './command-parser.js';
 import { FakeTracker } from './fake.js';
+import { isBotComment } from './types.js';
 
 /**
  * The fake is the test double that proves the tracker seam's logic without live
@@ -43,12 +44,13 @@ describe('FakeTracker', () => {
     const card = await tracker.createRunCard({ title: 'Run', body: 'state' });
 
     const posted = await tracker.postComment(card, '/approve');
-    expect(posted).toEqual({
-      id: 'c1',
-      author: 'workmachine',
-      body: '/approve',
-      createdAt: '2026-06-08T12:00:00.000Z',
-    });
+    expect(posted.id).toBe('c1');
+    expect(posted.createdAt).toBe('2026-06-08T12:00:00.000Z');
+    // The fake's own comment carries the bot marker and a NON-bot author, exactly
+    // like the live adapter — so self-recognition is by body, never by author.
+    expect(isBotComment(posted.body)).toBe(true);
+    expect(posted.body).toContain('/approve');
+    expect(posted.author).not.toBe('workmachine');
 
     const first = await tracker.readCommands(card);
     expect(first.comments).toEqual([posted]);
@@ -63,6 +65,21 @@ describe('FakeTracker', () => {
     expect(third.comments).toEqual([again]);
   });
 
+  it('postComment stamps the bot marker and a non-bot author', async () => {
+    const tracker = new FakeTracker();
+    const card = await tracker.createRunCard({ title: 'Run', body: 'state' });
+
+    const posted = await tracker.postComment(card, 'gate prompt');
+
+    // The marker — not the author — is the self-recognition signal. The author is
+    // deliberately a realistic non-bot login, like a real token's GitHub login,
+    // so the fake never proves an exclusion the live adapter couldn't reproduce.
+    expect(posted.body).toContain('gate prompt');
+    expect(isBotComment(posted.body)).toBe(true);
+    expect(posted.author).not.toBe('workmachine');
+    expect(posted.author).toBe('workmachine-app');
+  });
+
   it('scopes comments to their card', async () => {
     const tracker = new FakeTracker();
     const cardA = await tracker.createRunCard({ title: 'A', body: 'a' });
@@ -72,7 +89,10 @@ describe('FakeTracker', () => {
     await tracker.postComment(cardB, 'on B');
 
     const onA = await tracker.readCommands(cardA);
-    expect(onA.comments.map((c) => c.body)).toEqual(['on A']);
+    // Only card A's comment comes back; body carries the bot marker postComment
+    // stamps, so assert on the content rather than exact equality.
+    expect(onA.comments).toHaveLength(1);
+    expect(onA.comments[0]?.body).toContain('on A');
   });
 
   it('renders the review card idempotently, reusing the same card id', async () => {

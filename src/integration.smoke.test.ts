@@ -603,7 +603,8 @@ describe('integration smoke: feedback loop (request_changes -> tick -> approve -
  * The whole loop runs offline against the in-memory fake: `run create` opens the
  * fake card, the first `tick` runs the script step and opens the gate (rendering
  * the review card), `seedComment` injects a reviewer `/approve` on that card (NOT
- * `postComment`, which stamps the bot actor and is ingestion-excluded), and the
+ * `postComment`, which stamps the bot-comment marker and is ingestion-excluded by
+ * it, never by author), and the
  * next `tick` polls the card, ingests the comment as `command_received`, validates
  * it against the open gate, and folds the run to `completed`.
  *
@@ -730,8 +731,8 @@ describe('integration smoke: fake GitHub surface (create -> tick -> /approve com
     ]);
     expect(tracker.cardState(FAKE_SURFACE_CARD.id)?.renderCount).toBe(1);
 
-    // A reviewer leaves `/approve` on the card. seedComment authors it as a human
-    // handle (not the bot actor postComment stamps), so ingestion will pick it up.
+    // A reviewer leaves `/approve` on the card. seedComment posts a bare body with
+    // no bot-comment marker (unlike postComment), so ingestion will pick it up.
     await tracker.seedComment(FAKE_SURFACE_CARD, '/approve', REVIEWER);
 
     // The next tick polls the card, ingests the comment as `command_received`,

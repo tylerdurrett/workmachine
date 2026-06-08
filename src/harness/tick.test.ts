@@ -7,9 +7,9 @@ import type { EngineEvent } from '../domain/index.js';
 import { scriptExecutor } from '../executor/index.js';
 import { JsonlEventLog, createRunDir, resolveRunDir } from '../run/index.js';
 import {
-  BOT_ACTOR,
   type CommandCursor,
   FakeTracker,
+  isBotComment,
 } from '../tracker/index.js';
 import { loadWorkflow } from '../workflow/index.js';
 import type { WorkflowDefinition } from '../workflow/index.js';
@@ -761,12 +761,20 @@ steps:
       expect(events.some((e) => e.type === 'run_failed')).toBe(false);
     });
 
-    it('never re-ingests the engine’s own bot-authored comments (AC6)', async () => {
+    it('never re-ingests the engine’s own comments, by marker not author (AC6)', async () => {
       const { tracker, card, log, runDir, cursor } = await openGatedRun();
-      // The engine posts a note containing a slash verb, authored as the bot.
-      await tracker.postComment(card, '/approve (this is the gate prompt)');
-      // Sanity: the bot comment is stamped with the shared bot actor.
-      expect(BOT_ACTOR).toBe('workmachine');
+      // The engine posts a note containing a slash verb via its own postComment,
+      // which stamps the bot-comment marker into the body.
+      const botComment = await tracker.postComment(
+        card,
+        '/approve (this is the gate prompt)',
+      );
+      // Adversarial intent: the engine's own comment carries a realistic NON-bot
+      // author (the kind a real token's login yields), so this test would FAIL if
+      // exclusion regressed to author-matching. The only thing that excludes it is
+      // the body marker — assert the marker is present and the author is non-bot.
+      expect(isBotComment(botComment.body)).toBe(true);
+      expect(botComment.author).not.toBe('workmachine');
 
       await tick({
         workflow,
