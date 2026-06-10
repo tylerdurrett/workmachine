@@ -66,6 +66,70 @@ steps:
     expect(messages).toContain("duplicate artifact id 'out'");
   });
 
+  it('rejects a duplicate artifact id across a script and an agent step', () => {
+    const messages = issueMessages(`
+slug: dup-artifact-agent
+steps:
+  - id: a
+    type: script
+    run: echo 1
+    produces:
+      - id: out
+        path: artifacts/a.txt
+  - id: b
+    type: agent
+    prompt: 'Write into {{artifacts.out.path}}'
+    produces:
+      - id: out
+        path: artifacts/b.md
+`);
+    expect(messages).toContain("duplicate artifact id 'out'");
+  });
+
+  it('wires an implicit edge from a script step consuming an agent artifact', () => {
+    // No explicit needs: the only ordering comes from the artifact reference.
+    // A cycle through that implicit edge proves the edge exists for agent
+    // producers exactly as for script ones.
+    const messages = issueMessages(`
+slug: cycle-agent-artifacts
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Read {{artifacts.report.path}}, write {{artifacts.draft.path}}'
+    produces:
+      - id: draft
+        path: artifacts/draft.md
+  - id: report
+    type: script
+    run: 'cat {{artifacts.draft.path}} > {{artifacts.report.path}}'
+    produces:
+      - id: report
+        path: artifacts/report.txt
+`);
+    expect(
+      messages.some((m) =>
+        m.startsWith('cycle detected in step dependencies:'),
+      ),
+    ).toBe(true);
+  });
+
+  it('accepts an acyclic implicit edge from a script step to an agent producer', () => {
+    const def = loadWorkflow(`
+slug: agent-edge-ok
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write into {{artifacts.draft.path}}'
+    produces:
+      - id: draft
+        path: artifacts/draft.md
+  - id: publish
+    type: script
+    run: 'cat {{artifacts.draft.path}}'
+`);
+    expect(def.steps).toHaveLength(2);
+  });
+
   it('rejects a needs entry pointing at an unknown step', () => {
     const messages = issueMessages(`
 slug: bad-needs
