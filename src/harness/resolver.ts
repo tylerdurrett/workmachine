@@ -1,5 +1,14 @@
 import type { EngineEvent } from '../domain/index.js';
-import type { ScriptStep, WorkflowDefinition } from '../workflow/index.js';
+import type {
+  ResolvedAgentStep,
+  ResolvedScriptStep,
+  ResolvedStep,
+} from '../executor/index.js';
+import type {
+  AgentStep,
+  ScriptStep,
+  WorkflowDefinition,
+} from '../workflow/index.js';
 import {
   ARTIFACT_REF_RE,
   FEEDBACK_REF_RE,
@@ -192,4 +201,64 @@ export function resolveCommand(
   events: readonly EngineEvent[],
 ): string {
   return substitute(workflow, events, step.id, step.run);
+}
+
+/**
+ * Resolve an executable step into its {@link ResolvedStep} variant: a `script`
+ * step's `run` becomes the resolved `command`, an `agent` step's `prompt`
+ * becomes the resolved prompt (with the optional `model` passed through
+ * verbatim). Both go through the one shared {@link substitute} path, so every
+ * namespace works identically in a command and a prompt. Pure: no filesystem,
+ * clock, or shell — just `(workflow, step, events)`.
+ *
+ * The agent variant carries the AUTHOR prompt only — the executor-facing
+ * contract block (artifact instructions etc.) is composed at dispatch by the
+ * agent executor, never here.
+ *
+ * The overloads narrow the return variant when the step kind is statically
+ * known, so a caller holding a {@link ScriptStep} gets a
+ * {@link ResolvedScriptStep} without a runtime check.
+ *
+ * @param workflow the run's validated workflow definition (its snapshot).
+ * @param step the script or agent step whose templated text is being resolved.
+ * @param events the run's event log, read for the run's inputs and the latest
+ *   request-changes feedback.
+ * @returns the resolved variant matching the step's kind.
+ * @throws if a token references a binding absent from inputs/artifacts.
+ */
+export function resolveStep(
+  workflow: WorkflowDefinition,
+  step: ScriptStep,
+  events: readonly EngineEvent[],
+): ResolvedScriptStep;
+export function resolveStep(
+  workflow: WorkflowDefinition,
+  step: AgentStep,
+  events: readonly EngineEvent[],
+): ResolvedAgentStep;
+export function resolveStep(
+  workflow: WorkflowDefinition,
+  step: ScriptStep | AgentStep,
+  events: readonly EngineEvent[],
+): ResolvedStep;
+export function resolveStep(
+  workflow: WorkflowDefinition,
+  step: ScriptStep | AgentStep,
+  events: readonly EngineEvent[],
+): ResolvedStep {
+  if (step.type === 'script') {
+    return {
+      type: 'script',
+      id: step.id,
+      command: substitute(workflow, events, step.id, step.run),
+      produces: step.produces,
+    };
+  }
+  return {
+    type: 'agent',
+    id: step.id,
+    prompt: substitute(workflow, events, step.id, step.prompt),
+    ...(step.model !== undefined && { model: step.model }),
+    produces: step.produces,
+  };
 }

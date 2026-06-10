@@ -14,7 +14,7 @@ import {
   type ScriptStep,
   type WorkflowDefinition,
 } from '../workflow/index.js';
-import { resolveCommand } from './resolver.js';
+import { resolveStep } from './resolver.js';
 import { renderReviewCardBody } from './review-card.js';
 
 /**
@@ -166,13 +166,14 @@ export async function tick(deps: TickDeps): Promise<void> {
 
     if (decision.kind === 'run_step') {
       const step = stepOf(workflow, decision.stepId);
-      const command = resolveCommand(workflow, step, events);
-      append({ type: 'step_dispatched', stepId: step.id, command });
+      const resolved = resolveStep(workflow, step, events);
+      append({
+        type: 'step_dispatched',
+        stepId: step.id,
+        command: resolved.command,
+      });
 
-      const result = await executor.run(
-        { type: 'script', id: step.id, command, produces: step.produces },
-        { runDir },
-      );
+      const result = await executor.run(resolved, { runDir });
 
       if (result.ok) {
         append({
