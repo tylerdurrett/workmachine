@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import { isScriptStep, type WorkflowDefinition } from './schema.js';
+import {
+  isAgentStep,
+  isScriptStep,
+  type WorkflowDefinition,
+} from './schema.js';
 
 /**
  * Static validation of the step dependency graph (AC#3).
@@ -24,7 +28,7 @@ import { isScriptStep, type WorkflowDefinition } from './schema.js';
 /** Matches a resolved `{{artifacts.<id>.path}}` token, capturing the id. */
 const ARTIFACT_PATH_REF_RE = /\{\{\s*artifacts\.([A-Za-z0-9_-]+)\.path\s*\}\}/g;
 
-/** Collect the artifact ids referenced by a step's `run` and produced paths. */
+/** Collect the artifact ids referenced by a step's templated text and produced paths. */
 function referencedArtifactIds(text: string): string[] {
   return [...text.matchAll(ARTIFACT_PATH_REF_RE)].map(([, id]) => id ?? '');
 }
@@ -58,7 +62,7 @@ export function validateDag(def: WorkflowDefinition): z.ZodIssue[] {
   const producerStepIdByArtifact = new Map<string, string>();
   const seenArtifactIds = new Set<string>();
   def.steps.forEach((step, i) => {
-    if (!isScriptStep(step)) return;
+    if (!isScriptStep(step) && !isAgentStep(step)) return;
     step.produces.forEach((artifact, j) => {
       if (seenArtifactIds.has(artifact.id)) {
         issues.push({
@@ -97,10 +101,11 @@ export function validateDag(def: WorkflowDefinition): z.ZodIssue[] {
       addEdge(step.id, dep);
     });
 
-    // Implicit edges from resolved artifact references (script steps only;
-    // gate steps carry no command or produced paths).
-    if (!isScriptStep(step)) return;
-    const refTexts = [step.run, ...step.produces.map((a) => a.path)];
+    // Implicit edges from resolved artifact references (script and agent
+    // steps only; gate steps carry no templated text or produced paths).
+    if (!isScriptStep(step) && !isAgentStep(step)) return;
+    const templatedText = isScriptStep(step) ? step.run : step.prompt;
+    const refTexts = [templatedText, ...step.produces.map((a) => a.path)];
     for (const text of refTexts) {
       for (const artifactId of referencedArtifactIds(text)) {
         const producer = producerStepIdByArtifact.get(artifactId);

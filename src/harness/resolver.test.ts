@@ -78,6 +78,31 @@ steps:
     expect(command).toBe("printf 'hi' > artifacts/out.txt");
   });
 
+  it('resolves an {{artifacts.*.path}} token produced by an agent step', () => {
+    // The loader admits a script step referencing an agent-produced artifact;
+    // the resolver must see the same declared set or a loader-valid workflow
+    // would throw at dispatch.
+    const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a draft into {{artifacts.draft.path}}'
+    produces:
+      - id: draft
+        path: artifacts/draft.md
+  - id: publish
+    type: script
+    run: 'cat {{artifacts.draft.path}}'
+`);
+    const publish = workflow.steps.find((s) => s.id === 'publish');
+    if (publish === undefined || !isScriptStep(publish)) {
+      throw new Error('test workflow has no publish script step');
+    }
+    const command = resolveCommand(workflow, publish, [created()]);
+    expect(command).toBe('cat artifacts/draft.md');
+  });
+
   it('tolerates inner whitespace in a token, mirroring the loader grammar', () => {
     const workflow = loadWorkflow(`
 slug: tiny-smoke

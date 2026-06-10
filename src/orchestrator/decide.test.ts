@@ -57,6 +57,18 @@ steps:
     allowed_decisions: [approve, request_changes, reject]
 `);
 
+/** A single agent step, proving agent steps dispatch like any non-gate step. */
+const agentStep: WorkflowDefinition = loadWorkflow(`
+slug: agentic
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku into {{artifacts.draft.path}}'
+    produces:
+      - id: draft
+        path: artifacts/draft.md
+`);
+
 /** A gate that only permits approval, to exercise disallowed-verb rejection. */
 const approveOnly: WorkflowDefinition = loadWorkflow(`
 slug: approve-only
@@ -178,6 +190,14 @@ const cases: DecideCase[] = [
     workflow: oneStep,
     events: [created(0)],
     expected: { kind: 'run_step', stepId: 'greet' },
+  },
+  {
+    name: 'agent step: a freshly created run dispatches a pending agent step (non-gate)',
+    // decide special-cases only gate steps; an agent step is dispatchable
+    // exactly like a script step, with no orchestrator change.
+    workflow: agentStep,
+    events: [created(0)],
+    expected: { kind: 'run_step', stepId: 'draft' },
   },
   {
     name: 'mid-run: decide advances to the next ready step once a dep succeeds',

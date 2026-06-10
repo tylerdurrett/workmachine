@@ -4,6 +4,7 @@ import {
   ARTIFACT_REF_RE,
   FEEDBACK_REF_RE,
   INPUT_REF_RE,
+  isAgentStep,
   isScriptStep,
   TOKEN_RE,
 } from '../workflow/index.js';
@@ -80,13 +81,15 @@ function readFeedback(events: readonly EngineEvent[]): string {
 }
 
 /**
- * Build the `id → declared path` map from every artifact any step produces.
+ * Build the `id → declared path` map from every artifact any step produces
+ * (script and agent steps alike — the loader admits artifact refs against
+ * both, so the resolver must see the same declared set or the two drift).
  * Declared paths are static workflow data, so the map is the same on every tick.
  */
 function artifactPaths(workflow: WorkflowDefinition): Map<string, string> {
   return new Map(
     workflow.steps.flatMap((step) =>
-      isScriptStep(step)
+      isScriptStep(step) || isAgentStep(step)
         ? step.produces.map((a): [string, string] => [a.id, a.path])
         : [],
     ),
