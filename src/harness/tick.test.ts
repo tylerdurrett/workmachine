@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { EngineEvent } from '../domain/index.js';
-import { scriptExecutor } from '../executor/index.js';
+import { composeAgentPrompt, scriptExecutor } from '../executor/index.js';
 import type { Executor, ResolvedStep } from '../executor/index.js';
 import { JsonlEventLog, createRunDir, resolveRunDir } from '../run/index.js';
 import {
@@ -906,7 +906,7 @@ steps:
       };
     }
 
-    it('routes an agent step to the agent executor and records the resolved prompt + model', async () => {
+    it('routes an agent step to the agent executor and records the composed prompt + model', async () => {
       const workflow = loadWorkflow(`
 slug: tiny-smoke
 inputs:
@@ -938,25 +938,72 @@ steps:
         'run_completed',
       ]);
 
-      // step_dispatched carries the fully resolved prompt and the model.
+      // step_dispatched carries the fully composed prompt — the resolved author
+      // text plus the appended engine contract block — and the model.
+      const expectedPrompt = composeAgentPrompt(
+        'Write a haiku about pelicans',
+        [],
+      );
       const dispatched = events[1];
       expect(dispatched?.type).toBe('step_dispatched');
       if (dispatched?.type === 'step_dispatched') {
         expect(dispatched.stepType).toBe('agent');
         if (dispatched.stepType === 'agent') {
-          expect(dispatched.prompt).toBe('Write a haiku about pelicans');
+          expect(dispatched.prompt).toBe(expectedPrompt);
+          expect(
+            dispatched.prompt.startsWith('Write a haiku about pelicans'),
+          ).toBe(true);
+          expect(dispatched.prompt).toContain('## Engine contract');
           expect(dispatched.model).toBe('smart-model');
         }
       }
 
-      // The agent executor — not the script one — received the resolved step.
+      // The agent executor — not the script one — received the resolved step,
+      // with EXACTLY the prompt the log recorded (recorded === sent).
       expect(agent.seen).toHaveLength(1);
       expect(agent.seen[0]).toMatchObject({
         type: 'agent',
         id: 'draft',
-        prompt: 'Write a haiku about pelicans',
+        prompt: expectedPrompt,
         model: 'smart-model',
       });
+    });
+
+    it('lists declared artifact paths in the dispatched contract block', async () => {
+      const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a draft'
+    produces:
+      - id: out
+        path: artifacts/draft.md
+`);
+      const { runDir, log } = seedRun(workflow, [created()]);
+      const agent = fakeAgentExecutor();
+
+      await tick({
+        workflow,
+        log,
+        executors: { agent: agent.executor },
+        runDir,
+        now,
+      });
+
+      const dispatched = log.read()[1];
+      expect(dispatched?.type).toBe('step_dispatched');
+      if (
+        dispatched?.type === 'step_dispatched' &&
+        dispatched.stepType === 'agent'
+      ) {
+        expect(dispatched.prompt).toBe(
+          composeAgentPrompt('Write a draft', [
+            { id: 'out', path: 'artifacts/draft.md' },
+          ]),
+        );
+        expect(dispatched.prompt).toContain('artifacts/draft.md');
+      }
     });
 
     it('omits model from step_dispatched when the agent step sets none', async () => {
@@ -983,6 +1030,11 @@ steps:
       if (dispatched?.type === 'step_dispatched') {
         expect(dispatched.stepType).toBe('agent');
         expect('model' in dispatched).toBe(false);
+        if (dispatched.stepType === 'agent') {
+          expect(dispatched.prompt).toBe(
+            composeAgentPrompt('Write a haiku', []),
+          );
+        }
       }
     });
 

@@ -1,4 +1,5 @@
 import type { EngineEvent, RunState, StepStatus } from '../domain/index.js';
+import { composeAgentPrompt } from '../executor/index.js';
 import type { Executor, ResolvedStep } from '../executor/index.js';
 import { decide, foldRunState } from '../orchestrator/index.js';
 import type { EventLog } from '../run/index.js';
@@ -173,7 +174,13 @@ export async function tick(deps: TickDeps): Promise<void> {
 
     if (decision.kind === 'run_step') {
       const step = stepOf(workflow, decision.stepId);
-      const resolved = resolveStep(workflow, step, events);
+      // Compose the dispatchable step ONCE, at dispatch: an agent step gets the
+      // engine contract block appended to its resolved prompt here, so the
+      // prompt recorded on `step_dispatched` is byte-identical to the prompt
+      // the executor sends. Replay reads a completed step's recorded payload
+      // back from the log (via the fold) — it is never re-resolved or
+      // re-composed (#60's replay invariant).
+      const resolved = withContractBlock(resolveStep(workflow, step, events));
 
       // Look up the executor BEFORE appending step_dispatched: a misconfigured
       // registry must fail loudly without leaving a dangling dispatch in the
@@ -424,6 +431,20 @@ function runIdOf(events: readonly EngineEvent[]): string {
     if (event.type === 'run_created') return event.runId;
   }
   throw new Error('cannot tick a run with no run_created event in its log');
+}
+
+/**
+ * Append the engine contract block to an agent step's resolved prompt
+ * ({@link composeAgentPrompt}, ADR-0009): the declared artifact paths it must
+ * write, stay-in-run-dir, no commits/pushes. A non-agent step passes through
+ * untouched — scripts carry no prompt to compose.
+ */
+function withContractBlock(resolved: ResolvedStep): ResolvedStep {
+  if (resolved.type !== 'agent') return resolved;
+  return {
+    ...resolved,
+    prompt: composeAgentPrompt(resolved.prompt, resolved.produces),
+  };
 }
 
 /**
