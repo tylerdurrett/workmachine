@@ -153,6 +153,7 @@ function dispatched(seq: number, stepId: string): EngineEvent {
     seq,
     ts: '2026-06-07T12:00:01.000Z',
     stepId,
+    stepType: 'script',
     command: `echo ${stepId}`,
   };
 }

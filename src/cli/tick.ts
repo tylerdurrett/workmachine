@@ -22,9 +22,11 @@ import { isGateStep, loadWorkflowFile } from '../workflow/index.js';
  * This is the CLI wrapper around the harness loop (`../harness/tick.ts`). It
  * resolves the run's directory from its id, loads the *pinned* workflow snapshot
  * (so a run always ticks against the definition it was created with, even if the
- * source package changed), and hands the harness the real `scriptExecutor`. The
- * harness reads the run id back from the log's `run_created` event — never from
- * here — keeping that identity single-sourced (CONTEXT.md → Run / run id scheme).
+ * source package changed), and binds the harness's executor registry — the real
+ * `scriptExecutor` under `script` for now; the agent executor (#61) registers
+ * `agent` later. The harness reads the run id back from the log's `run_created`
+ * event — never from here — keeping that identity single-sourced (CONTEXT.md →
+ * Run / run id scheme).
  *
  * It also builds the live tracker the harness renders the review card onto when a
  * gate opens (ADR-0004). The run is self-describing: the target repo is read from
@@ -104,7 +106,7 @@ export async function runTick(opts: RunTickOptions): Promise<void> {
   await tick({
     workflow,
     log,
-    executor: scriptExecutor,
+    executors: { script: scriptExecutor },
     runDir: layout.runDir,
     ...(opts.now ? { now: opts.now } : {}),
     ...(tracker
