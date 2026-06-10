@@ -94,16 +94,42 @@ export interface CardCreatedEvent extends EventEnvelope {
 }
 
 /**
- * A step was dispatched to its executor. The resolver records the
- * fully-resolved command here so the log is self-describing on replay.
+ * Fields shared by every `step_dispatched` variant. The resolver records the
+ * fully-resolved payload (per step kind) so the log is self-describing on
+ * replay: the bytes that ran are read back from the log, never re-resolved.
  */
-export interface StepDispatchedEvent extends EventEnvelope {
+interface StepDispatchedBase extends EventEnvelope {
   type: 'step_dispatched';
   /** Id of the step being dispatched. */
   stepId: string;
+  /** Kind of the dispatched step; discriminates the resolved payload shape. */
+  stepType: 'script' | 'agent';
+}
+
+/** A `script` step was dispatched: records its fully-resolved command. */
+export interface ScriptStepDispatchedEvent extends StepDispatchedBase {
+  stepType: 'script';
   /** The fully-resolved command the executor runs (no `{{...}}` left). */
   command: string;
 }
+
+/** An `agent` step was dispatched: records its fully-resolved prompt. */
+export interface AgentStepDispatchedEvent extends StepDispatchedBase {
+  stepType: 'agent';
+  /** The fully-resolved prompt the agent invocation receives (no `{{...}}` left). */
+  prompt: string;
+  /** Optional model override for the agent invocation, recorded verbatim. */
+  model?: string;
+}
+
+/**
+ * A step was dispatched to its executor, discriminated by `stepType`. Each
+ * variant carries the resolved payload for its kind — `command` for script
+ * steps, `prompt` (+ optional `model`) for agent steps.
+ */
+export type StepDispatchedEvent =
+  | ScriptStepDispatchedEvent
+  | AgentStepDispatchedEvent;
 
 /** A step finished successfully, producing zero or more artifacts. */
 export interface StepSucceededEvent extends EventEnvelope {

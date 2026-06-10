@@ -44,6 +44,7 @@ describe('domain type contracts', () => {
         seq: 2,
         ts: '2026-06-07T12:00:01.000Z',
         stepId: 'greet',
+        stepType: 'script',
         command: 'echo "hello world"',
       },
       {

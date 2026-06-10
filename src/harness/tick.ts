@@ -170,6 +170,7 @@ export async function tick(deps: TickDeps): Promise<void> {
       append({
         type: 'step_dispatched',
         stepId: step.id,
+        stepType: 'script',
         command: resolved.command,
       });
 

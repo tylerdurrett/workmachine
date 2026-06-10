@@ -116,11 +116,12 @@ export function foldRunState(
       }
       case 'step_dispatched': {
         danglingDispatch.add(event.stepId);
-        steps[event.stepId] = {
-          stepId: event.stepId,
-          status: 'running',
-          command: event.command,
-        };
+        // Only a script dispatch carries a `command`; an agent dispatch records
+        // its resolved `prompt` on the event itself, not in StepState.
+        steps[event.stepId] = withCommand(
+          { stepId: event.stepId, status: 'running' },
+          event.stepType === 'script' ? event.command : undefined,
+        );
         break;
       }
       case 'step_succeeded': {

@@ -1,5 +1,6 @@
 export type { ArtifactIndexEntry } from './artifacts.js';
 export type {
+  AgentStepDispatchedEvent,
   CardCreatedEvent,
   CommandReceivedEvent,
   EngineEvent,
@@ -11,6 +12,7 @@ export type {
   RunCompletedEvent,
   RunCreatedEvent,
   RunFailedEvent,
+  ScriptStepDispatchedEvent,
   StepDispatchedEvent,
   StepFailedEvent,
   StepSucceededEvent,

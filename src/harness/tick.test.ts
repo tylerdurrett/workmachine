@@ -91,6 +91,12 @@ steps:
     const dispatched = events[1];
     expect(dispatched?.type).toBe('step_dispatched');
     if (dispatched?.type === 'step_dispatched') {
+      expect(dispatched.stepType).toBe('script');
+    }
+    if (
+      dispatched?.type === 'step_dispatched' &&
+      dispatched.stepType === 'script'
+    ) {
       expect(dispatched.command).toBe('printf hi > artifacts/out.txt');
       expect(dispatched.command).not.toMatch(/\{\{/);
     }
@@ -133,7 +139,10 @@ steps:
     const events = log.read();
     const dispatched = events.find((e) => e.type === 'step_dispatched');
     expect(dispatched?.type).toBe('step_dispatched');
-    if (dispatched?.type === 'step_dispatched') {
+    if (
+      dispatched?.type === 'step_dispatched' &&
+      dispatched.stepType === 'script'
+    ) {
       expect(dispatched.command).toBe("printf 'hello run' > artifacts/out.txt");
     }
     expect(events.at(-1)?.type).toBe('run_completed');
@@ -382,6 +391,7 @@ steps:
         seq: 1,
         ts: now(),
         stepId: 'greet',
+        stepType: 'script',
         command: 'printf hi > artifacts/out.txt',
       },
     ]);

@@ -113,7 +113,10 @@ describe('integration smoke: gateless spine (create -> tick -> completed)', () =
     // The dispatched command is fully resolved — no tokens, real artifact path.
     const dispatched = events[2];
     expect(dispatched?.type).toBe('step_dispatched');
-    if (dispatched?.type === 'step_dispatched') {
+    if (
+      dispatched?.type === 'step_dispatched' &&
+      dispatched.stepType === 'script'
+    ) {
       expect(dispatched.command).not.toMatch(/\{\{/);
       expect(dispatched.command).toContain('artifacts/greeting.txt');
     }
@@ -485,7 +488,10 @@ describe('integration smoke: feedback loop (request_changes -> tick -> approve -
     // and the greeting carries no revision line.
     const firstDispatch = log.read().find((e) => e.type === 'step_dispatched');
     expect(firstDispatch?.type).toBe('step_dispatched');
-    if (firstDispatch?.type === 'step_dispatched') {
+    if (
+      firstDispatch?.type === 'step_dispatched' &&
+      firstDispatch.stepType === 'script'
+    ) {
       expect(firstDispatch.command).not.toMatch(/\{\{/);
       expect(firstDispatch.command).toContain(`"${feedbackScriptPath}"`);
       // The trailing feedback arg is empty on the first round.
@@ -532,12 +538,16 @@ describe('integration smoke: feedback loop (request_changes -> tick -> approve -
     );
     expect(dispatches).toHaveLength(2);
     const redispatch = dispatches[1];
-    if (redispatch?.type === 'step_dispatched') {
+    if (
+      redispatch?.type === 'step_dispatched' &&
+      redispatch.stepType === 'script'
+    ) {
       expect(redispatch.command).not.toMatch(/\{\{/);
       expect(redispatch.command).toContain(`"${REVISION_NOTE}"`);
       // The re-run's command legitimately differs from the first dispatch.
       expect(redispatch.command).not.toBe(
-        dispatches[0]?.type === 'step_dispatched'
+        dispatches[0]?.type === 'step_dispatched' &&
+          dispatches[0].stepType === 'script'
           ? dispatches[0].command
           : undefined,
       );
