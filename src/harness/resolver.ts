@@ -10,15 +10,18 @@ import {
 } from '../workflow/index.js';
 
 /**
- * The resolver: turn a step's templated `run` command into the concrete shell
- * string the executor runs, by substituting `{{...}}` tokens at dispatch time
- * (ADR-0003; CONTEXT.md → Resolver / Determinism boundary).
+ * The resolver: turn a step's templated text into the concrete string the
+ * executor consumes, by substituting `{{...}}` tokens at dispatch time
+ * (ADR-0003; CONTEXT.md → Resolver / Determinism boundary). One generic
+ * substitution path serves every step kind — a `script` step's `run` becomes
+ * the shell command, an `agent` step's `prompt` becomes the literal prompt —
+ * so the grammar cannot fork between kinds.
  *
  * Resolution is the harness's job, never `decide`'s. `decide` is a pure fold
  * that only *names* the next step; it builds no shell strings and knows no path
  * layout. The resolver lives on the impure side of the boundary only because it
  * reads the run's inputs from the log — but it is itself a pure function of
- * `(workflow, step, events)`, with no I/O, so the resolved command it produces
+ * `(workflow, step, events)`, with no I/O, so the resolved text it produces
  * is deterministic and gets recorded verbatim on `step_dispatched`. That
  * recording is what makes replay safe: a re-tick after a crash reads the
  * resolved command back from the log rather than re-resolving it.
@@ -97,25 +100,29 @@ function artifactPaths(workflow: WorkflowDefinition): Map<string, string> {
 }
 
 /**
- * Resolve `step.run` into a concrete command by substituting every `{{...}}`
- * token. Pure: no filesystem, clock, or shell — just `(workflow, step, events)`.
+ * Substitute every `{{...}}` token in one piece of templated text against the
+ * run's bindings. This is the single substitution path every step kind goes
+ * through — a script step's `run` and an agent step's `prompt` resolve through
+ * exactly the same grammar, so the namespaces cannot drift between kinds.
  *
  * The loader has already validated that every token names a declared input or a
  * produced artifact, so in practice no binding is missing; the defensive throw
  * exists so a malformed log (or a future caller that skips the loader) fails
- * loudly at dispatch rather than dispatching a half-substituted command.
+ * loudly at dispatch rather than dispatching half-substituted text.
  *
  * @param workflow the run's validated workflow definition (its snapshot).
- * @param step the script step whose templated command is being resolved.
  * @param events the run's event log, read for the run's inputs and the latest
  *   request-changes feedback.
- * @returns the fully-resolved command, with no `{{...}}` tokens remaining.
+ * @param stepId id of the step being resolved, for error messages.
+ * @param text the templated text to substitute (`run` or `prompt`).
+ * @returns the fully-resolved text, with no `{{...}}` tokens remaining.
  * @throws if a token references a binding absent from inputs/artifacts.
  */
-export function resolveCommand(
+function substitute(
   workflow: WorkflowDefinition,
-  step: ScriptStep,
   events: readonly EngineEvent[],
+  stepId: string,
+  text: string,
 ): string {
   const inputs = readInputs(events);
   const paths = artifactPaths(workflow);
@@ -130,7 +137,7 @@ export function resolveCommand(
       const name = match[1] ?? '';
       if (!(name in inputs)) {
         throw new Error(
-          `cannot resolve {{inputs.${name}}} in step '${step.id}': no such input on the run`,
+          `cannot resolve {{inputs.${name}}} in step '${stepId}': no such input on the run`,
         );
       }
       return String(inputs[name]);
@@ -142,7 +149,7 @@ export function resolveCommand(
       const path = paths.get(id);
       if (path === undefined) {
         throw new Error(
-          `cannot resolve {{artifacts.${id}.path}} in step '${step.id}': no step produces artifact '${id}'`,
+          `cannot resolve {{artifacts.${id}.path}} in step '${stepId}': no step produces artifact '${id}'`,
         );
       }
       return path;
@@ -156,13 +163,33 @@ export function resolveCommand(
     },
   ];
 
-  return step.run.replace(TOKEN_RE, (_token, inner: string) => {
+  return text.replace(TOKEN_RE, (_token, inner: string) => {
     for (const resolve of resolvers) {
       const value = resolve(inner);
       if (value !== undefined) return value;
     }
     throw new Error(
-      `unsupported interpolation '{{${inner}}}' in step '${step.id}'`,
+      `unsupported interpolation '{{${inner}}}' in step '${stepId}'`,
     );
   });
+}
+
+/**
+ * Resolve `step.run` into a concrete command by substituting every `{{...}}`
+ * token through the shared {@link substitute} path. Pure: no filesystem, clock,
+ * or shell — just `(workflow, step, events)`.
+ *
+ * @param workflow the run's validated workflow definition (its snapshot).
+ * @param step the script step whose templated command is being resolved.
+ * @param events the run's event log, read for the run's inputs and the latest
+ *   request-changes feedback.
+ * @returns the fully-resolved command, with no `{{...}}` tokens remaining.
+ * @throws if a token references a binding absent from inputs/artifacts.
+ */
+export function resolveCommand(
+  workflow: WorkflowDefinition,
+  step: ScriptStep,
+  events: readonly EngineEvent[],
+): string {
+  return substitute(workflow, events, step.id, step.run);
 }
