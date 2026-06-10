@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { loadWorkflow } from './loader.js';
-import { isGateStep, isScriptStep } from './schema.js';
+import { isAgentStep, isGateStep, isScriptStep } from './schema.js';
 
 const validYaml = `
 slug: tiny-smoke
@@ -134,6 +134,67 @@ steps:
     type: gate
     allowed_decisions: [approve]
     run: echo hi
+`),
+    ).toThrow(z.ZodError);
+  });
+
+  it('accepts an agent step with a prompt, produces, and an optional model', () => {
+    const def = loadWorkflow(`
+slug: agentic
+inputs:
+  topic:
+    type: string
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write about {{inputs.topic}} into {{artifacts.draft.path}}'
+    model: gpt-5
+    produces:
+      - id: draft
+        path: artifacts/draft.md
+`);
+    const step = def.steps[0];
+    expect(step && isAgentStep(step)).toBe(true);
+    expect(step && isAgentStep(step) && step.model).toBe('gpt-5');
+    expect(step && isAgentStep(step) && step.produces).toEqual([
+      { id: 'draft', path: 'artifacts/draft.md' },
+    ]);
+  });
+
+  it('accepts an agent step without a model (model is optional)', () => {
+    const def = loadWorkflow(`
+slug: agentic
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku'
+`);
+    const step = def.steps[0];
+    expect(step && isAgentStep(step) && step.model).toBeUndefined();
+    expect(step?.needs).toEqual([]);
+  });
+
+  it('rejects an agent step carrying an unknown key via .strict()', () => {
+    expect(() =>
+      loadWorkflow(`
+slug: x
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku'
+    run: echo hi
+`),
+    ).toThrow(z.ZodError);
+  });
+
+  it('rejects an agent step with an empty prompt', () => {
+    expect(() =>
+      loadWorkflow(`
+slug: x
+steps:
+  - id: draft
+    type: agent
+    prompt: ''
 `),
     ).toThrow(z.ZodError);
   });
