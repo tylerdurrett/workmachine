@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { scriptExecutor } from '../executor/index.js';
+import { agentExecutor, scriptExecutor } from '../executor/index.js';
 import { tick } from '../harness/index.js';
 import { foldRunState } from '../orchestrator/index.js';
 import {
@@ -23,8 +23,9 @@ import { isGateStep, loadWorkflowFile } from '../workflow/index.js';
  * resolves the run's directory from its id, loads the *pinned* workflow snapshot
  * (so a run always ticks against the definition it was created with, even if the
  * source package changed), and binds the harness's executor registry — the real
- * `scriptExecutor` under `script` for now; the agent executor (#61) registers
- * `agent` later. The harness reads the run id back from the log's `run_created`
+ * `scriptExecutor` under `script` and the real `agentExecutor` under `agent`
+ * (real codex spawn, hardcoded generous wall-clock timeout, ADR-0009). The
+ * harness reads the run id back from the log's `run_created`
  * event — never from here — keeping that identity single-sourced (CONTEXT.md →
  * Run / run id scheme).
  *
@@ -106,7 +107,7 @@ export async function runTick(opts: RunTickOptions): Promise<void> {
   await tick({
     workflow,
     log,
-    executors: { script: scriptExecutor },
+    executors: { script: scriptExecutor, agent: agentExecutor },
     runDir: layout.runDir,
     ...(opts.now ? { now: opts.now } : {}),
     ...(tracker
