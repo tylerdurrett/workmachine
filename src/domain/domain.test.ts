@@ -199,6 +199,57 @@ describe('domain type contracts', () => {
     expect(artifact.size).toBe(12);
     expect(artifact.sha256).toHaveLength(64);
   });
+
+  it('carries an optional agent summary on step_succeeded, absent for scripts', () => {
+    const scriptSucceeded: EngineEvent = {
+      type: 'step_succeeded',
+      runId,
+      seq: 3,
+      ts: '2026-06-07T12:00:02.000Z',
+      stepId: 'greet',
+      artifacts: [artifact],
+    };
+    const agentSucceeded: EngineEvent = {
+      type: 'step_succeeded',
+      runId,
+      seq: 3,
+      ts: '2026-06-07T12:00:02.000Z',
+      stepId: 'draft',
+      artifacts: [artifact],
+      summary: 'Wrote the draft.',
+    };
+
+    // A script step's event omits the field entirely (not set to undefined).
+    expect('summary' in scriptSucceeded).toBe(false);
+    if (agentSucceeded.type === 'step_succeeded') {
+      expect(agentSucceeded.summary).toBe('Wrote the draft.');
+    }
+  });
+
+  it('carries an optional agent summary on step_failed, absent for scripts', () => {
+    const scriptFailed: EngineEvent = {
+      type: 'step_failed',
+      runId,
+      seq: 4,
+      ts: '2026-06-07T12:00:03.000Z',
+      stepId: 'greet',
+      reason: 'exit code 1',
+    };
+    const agentFailed: EngineEvent = {
+      type: 'step_failed',
+      runId,
+      seq: 4,
+      ts: '2026-06-07T12:00:03.000Z',
+      stepId: 'draft',
+      reason: 'codex exited with code 3',
+      summary: 'Got stuck on the second stanza.',
+    };
+
+    expect('summary' in scriptFailed).toBe(false);
+    if (agentFailed.type === 'step_failed') {
+      expect(agentFailed.summary).toBe('Got stuck on the second stanza.');
+    }
+  });
 });
 
 describe('foldRunState card_created handling', () => {
