@@ -2,9 +2,12 @@ slug: tiny-agent
 name: Tiny Agent
 description: >-
   The engine's committed agent-step example. One agent step hands a resolved
-  prompt to the Codex CLI, which writes a haiku artifact under the run
-  directory, then a review gate waits for a reviewer decision — exercising the
-  create -> tick (stop at gate) -> command -> tick (advance) loop end to end
+  prompt — which threads {{feedback.note}} — to the Codex CLI, which writes a
+  haiku artifact under the run directory, then a review gate waits for a
+  reviewer decision. On request_changes the gate re-opens (one card per gate)
+  and the step re-runs with the reviewer's note interpolated into the prompt, so
+  the revised artifact legitimately differs — exercising the create -> tick
+  (stop at gate) -> request_changes -> tick -> approve -> tick loop end to end
   with an agent step instead of a script step.
 inputs:
   topic:
@@ -15,7 +18,8 @@ steps:
     type: agent
     prompt: >-
       Write a haiku about {{inputs.topic}}. Output only the three lines of the
-      haiku, nothing else.
+      haiku, nothing else. Address this reviewer feedback if present:
+      {{feedback.note}}
     produces:
       - id: haiku
         path: artifacts/haiku.txt
