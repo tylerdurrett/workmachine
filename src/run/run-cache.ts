@@ -69,12 +69,18 @@ export function foldRun(events: EngineEvent[]): RunState {
         const step = stepStatus(event.stepId);
         step.status = 'succeeded';
         step.artifacts = event.artifacts;
+        // Agent metadata (ADR-0009): carry it onto the step only when present,
+        // so a script step's projection stays free of the keys.
+        if (event.summary !== undefined) step.summary = event.summary;
+        if (event.sessionRef !== undefined) step.sessionRef = event.sessionRef;
         break;
       }
       case 'step_failed': {
         const step = stepStatus(event.stepId);
         step.status = 'failed';
         step.reason = event.reason;
+        if (event.summary !== undefined) step.summary = event.summary;
+        if (event.sessionRef !== undefined) step.sessionRef = event.sessionRef;
         break;
       }
       case 'run_completed':

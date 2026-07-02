@@ -294,3 +294,111 @@ describe('foldRunState card_created handling', () => {
     expect(state.steps.greet?.status).toBe('pending');
   });
 });
+
+describe('foldRunState agent summary handling', () => {
+  const workflow: WorkflowDefinition = {
+    slug: 'tiny-agent',
+    inputs: {},
+    steps: [
+      {
+        id: 'draft',
+        type: 'agent',
+        prompt: 'Write a draft',
+        needs: [],
+        produces: [],
+      },
+    ],
+  };
+
+  function created(): EngineEvent {
+    return {
+      type: 'run_created',
+      runId,
+      seq: 0,
+      ts: '2026-06-07T12:00:00.000Z',
+      workflowSlug: 'tiny-agent',
+      inputs: {},
+    };
+  }
+
+  it('carries the summary onto StepState from step_succeeded', () => {
+    const state = foldRunState(workflow, [
+      created(),
+      {
+        type: 'step_dispatched',
+        runId,
+        seq: 1,
+        ts: '2026-06-07T12:00:01.000Z',
+        stepId: 'draft',
+        stepType: 'agent',
+        prompt: 'Write a draft',
+      },
+      {
+        type: 'step_succeeded',
+        runId,
+        seq: 2,
+        ts: '2026-06-07T12:00:02.000Z',
+        stepId: 'draft',
+        artifacts: [],
+        summary: 'Wrote the draft.',
+      },
+    ]);
+
+    expect(state.steps.draft?.status).toBe('succeeded');
+    expect(state.steps.draft?.summary).toBe('Wrote the draft.');
+  });
+
+  it('carries the summary onto StepState from step_failed', () => {
+    const state = foldRunState(workflow, [
+      created(),
+      {
+        type: 'step_dispatched',
+        runId,
+        seq: 1,
+        ts: '2026-06-07T12:00:01.000Z',
+        stepId: 'draft',
+        stepType: 'agent',
+        prompt: 'Write a draft',
+      },
+      {
+        type: 'step_failed',
+        runId,
+        seq: 2,
+        ts: '2026-06-07T12:00:02.000Z',
+        stepId: 'draft',
+        reason: 'codex exited with code 3',
+        summary: 'Got stuck.',
+      },
+    ]);
+
+    expect(state.steps.draft?.status).toBe('failed');
+    expect(state.steps.draft?.summary).toBe('Got stuck.');
+  });
+
+  it('omits summary from StepState when the terminal event bore none', () => {
+    const state = foldRunState(workflow, [
+      created(),
+      {
+        type: 'step_dispatched',
+        runId,
+        seq: 1,
+        ts: '2026-06-07T12:00:01.000Z',
+        stepId: 'draft',
+        stepType: 'agent',
+        prompt: 'Write a draft',
+      },
+      {
+        type: 'step_succeeded',
+        runId,
+        seq: 2,
+        ts: '2026-06-07T12:00:02.000Z',
+        stepId: 'draft',
+        artifacts: [],
+      },
+    ]);
+
+    const draft = state.steps.draft;
+    expect(draft && 'summary' in draft).toBe(false);
+    expect(draft && 'sessionRef' in draft).toBe(false);
+  });
+});
