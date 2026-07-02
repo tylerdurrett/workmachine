@@ -32,6 +32,9 @@ tracked deliverable rather than an afterthought.
     --color 5319e7 --description "Machine-opened run card"
   ```
 - **Build** — `pnpm build` (the CLI runs from `dist/`).
+- **Codex CLI** (agent-step demo only) — `codex` installed on `PATH` and logged in
+  under **subscription auth** (`codex exec` runs non-interactively; no API-key
+  billing). Verify with `codex login status`.
 
 ## The demo
 
@@ -84,6 +87,58 @@ node dist/cli/main.js tick "$RID"
 
 Confirm: the log ends `command_received` → `gate_decided (approve)` →
 `run_completed`, and `runs/$RID/run.yaml` reads `status: completed`.
+
+## The agent-step demo (approve path)
+
+The agent-step counterpart (issue #62): the committed `workflows/tiny-agent/`
+package drives one `agent` step through the **real** `codex exec` — the engine
+spawns it as a subprocess (ADR-0009), it writes the haiku artifact under the run
+dir, and the same gated loop carries it to `run_completed`. This demo is
+**human-watched at slice ship** and owned by task **#63**; CI never runs it —
+the hermetic smoke (`src/integration.smoke.test.ts`) proves the same loop
+offline with a stub `codex` on `PATH`.
+
+Prerequisites as above, plus the Codex CLI logged in under subscription auth.
+
+```sh
+set -a; . ./.env; set +a
+export WORKMACHINE_SANDBOX_REPO=tylerdurrett/workmachine-sandbox
+
+# 1. Create — opens a real workmachine-labeled issue with the run-id body marker.
+node dist/cli/main.js run create workflows/tiny-agent/workflow.yaml \
+  --input "topic=autumn rain"
+# -> prints: created run <RID>
+RID=<RID>
+
+# 2. Tick — dispatches the composed prompt to the real `codex exec`, which
+#    writes the haiku; the executor captures it and the review card renders.
+#    (An agent step legitimately takes a minute or two.)
+node dist/cli/main.js tick "$RID"
+```
+
+Confirm:
+
+- `runs/$RID/artifacts/haiku.txt` exists and contains a real haiku about the
+  topic — written by codex, not by the engine.
+- The review card on github.com shows the `haiku` artifact with its sha256 and
+  byte size, plus the gate's allowed decisions. The log stops at `gate_opened`.
+- `step_dispatched` in `runs/$RID/events.jsonl` has `stepType: "agent"` and its
+  `prompt` is the FULL resolved payload: the author text with the topic
+  substituted (no `{{...}}` left) plus the appended `## Engine contract` block
+  naming `artifacts/haiku.txt`.
+
+```sh
+# 3. /approve round — OPERATOR comments on the issue (a human handle, not the
+#    `workmachine` bot actor, which ingestion skips), then tick.
+#      comment on the issue:  /approve
+node dist/cli/main.js tick "$RID"
+```
+
+Confirm: the log ends `command_received` → `gate_decided (approve)` →
+`run_completed` carrying the haiku artifact, and `runs/$RID/run.yaml` reads
+`status: completed`.
+
+Teardown is the same as below.
 
 ## Teardown
 

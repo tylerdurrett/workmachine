@@ -59,7 +59,9 @@ export function foldRun(events: EngineEvent[]): RunState {
       case 'step_dispatched': {
         const step = stepStatus(event.stepId);
         step.status = 'running';
-        step.command = event.command;
+        // Only a script dispatch carries a `command`; an agent dispatch records
+        // its resolved `prompt` on the event itself, not in StepState.
+        if (event.stepType === 'script') step.command = event.command;
         if (state.status === 'pending') state.status = 'running';
         break;
       }

@@ -1,13 +1,17 @@
 import { z } from 'zod';
-import { isScriptStep, type WorkflowDefinition } from './schema.js';
+import {
+  isAgentStep,
+  isScriptStep,
+  type WorkflowDefinition,
+} from './schema.js';
 
 /**
  * Static validation of `{{...}}` interpolation references (AC#2).
  *
  * The loader never substitutes values — that is the resolver's job (#11). This
- * pass only checks that every interpolation token in a step's `run` command and
- * in each produced artifact's `path` points at something the workflow actually
- * declares:
+ * pass only checks that every interpolation token in a step's templated text (a
+ * script step's `run`, an agent step's `prompt`) and in each produced
+ * artifact's `path` points at something the workflow actually declares:
  *  - `{{inputs.<name>}}` must name a declared input.
  *  - `{{artifacts.<id>.path}}` must name an artifact some step `produces` (an
  *    unresolved one is the "dangling artifact ref" the contract calls out).
@@ -52,7 +56,9 @@ export function validateInterpolationRefs(
   const declaredInputs = new Set(Object.keys(def.inputs));
   const producedIds = new Set(
     def.steps.flatMap((step) =>
-      isScriptStep(step) ? step.produces.map((a) => a.id) : [],
+      isScriptStep(step) || isAgentStep(step)
+        ? step.produces.map((a) => a.id)
+        : [],
     ),
   );
 
@@ -102,10 +108,15 @@ export function validateInterpolationRefs(
   };
 
   def.steps.forEach((step, stepIndex) => {
-    // Only script steps carry interpolatable text; gate steps have no `run` or
-    // produced paths.
-    if (!isScriptStep(step)) return;
-    check(step.run, ['steps', stepIndex, 'run']);
+    // Only script and agent steps carry interpolatable text; gate steps have
+    // no templated command/prompt or produced paths.
+    if (isScriptStep(step)) {
+      check(step.run, ['steps', stepIndex, 'run']);
+    } else if (isAgentStep(step)) {
+      check(step.prompt, ['steps', stepIndex, 'prompt']);
+    } else {
+      return;
+    }
     step.produces.forEach((artifact, pathIndex) => {
       check(artifact.path, ['steps', stepIndex, 'produces', pathIndex, 'path']);
     });

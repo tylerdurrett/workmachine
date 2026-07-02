@@ -102,6 +102,80 @@ steps:
     );
   });
 
+  it('rejects an undeclared input referenced in an agent prompt, at the prompt path', () => {
+    try {
+      loadWorkflow(`
+slug: bad-agent-input
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write about {{inputs.missing}}'
+`);
+      throw new Error('expected loadWorkflow to throw a ZodError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(z.ZodError);
+      const issue = (err as z.ZodError).issues[0];
+      expect(issue?.message).toBe("references undeclared input 'missing'");
+      expect(issue?.path).toEqual(['steps', 0, 'prompt']);
+    }
+  });
+
+  it('rejects a dangling artifact reference in an agent prompt', () => {
+    const messages = issueMessages(`
+slug: bad-agent-artifact
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Summarize {{artifacts.ghost.path}}'
+`);
+    expect(messages).toContain(
+      "references artifact 'ghost' that no step produces",
+    );
+  });
+
+  it('lets a script step reference an agent-produced artifact', () => {
+    const def = loadWorkflow(`
+slug: agent-producer
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a draft into {{artifacts.draft.path}}'
+    produces:
+      - id: draft
+        path: artifacts/draft.md
+  - id: publish
+    type: script
+    run: 'cat {{artifacts.draft.path}}'
+    needs: [draft]
+`);
+    expect(def.steps).toHaveLength(2);
+  });
+
+  it('accepts a well-formed {{feedback.<field>}} reference in an agent prompt', () => {
+    const def = loadWorkflow(`
+slug: agent-feedback
+steps:
+  - id: revise
+    type: agent
+    prompt: 'Apply this feedback: {{feedback.note}}'
+`);
+    expect(def.steps[0]?.id).toBe('revise');
+  });
+
+  it('validates tokens inside agent produced artifact paths too', () => {
+    const messages = issueMessages(`
+slug: agent-path-token
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write something'
+    produces:
+      - id: out
+        path: 'artifacts/{{inputs.dir}}/out.md'
+`);
+    expect(messages).toContain("references undeclared input 'dir'");
+  });
+
   it('validates tokens inside produced artifact paths too', () => {
     const messages = issueMessages(`
 slug: path-token

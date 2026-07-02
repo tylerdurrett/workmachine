@@ -1,5 +1,6 @@
 import type { EngineEvent, RunState, StepStatus } from '../domain/index.js';
-import type { Executor } from '../executor/index.js';
+import { composeAgentPrompt } from '../executor/index.js';
+import type { Executor, ResolvedStep } from '../executor/index.js';
 import { decide, foldRunState } from '../orchestrator/index.js';
 import type { EventLog } from '../run/index.js';
 import {
@@ -10,11 +11,12 @@ import {
   type TrackerAdapter,
 } from '../tracker/index.js';
 import {
-  isScriptStep,
+  type AgentStep,
+  isGateStep,
   type ScriptStep,
   type WorkflowDefinition,
 } from '../workflow/index.js';
-import { resolveCommand } from './resolver.js';
+import { resolveStep } from './resolver.js';
 import { renderReviewCardBody } from './review-card.js';
 
 /**
@@ -35,9 +37,9 @@ import { renderReviewCardBody } from './review-card.js';
  *      `/approve` left between ticks is visible to the very next fold;
  *   1. read the log, fold it via `decide`;
  *   2. `done` → stop (the run is already terminal);
- *   3. `run_step` → resolve the command, append `step_dispatched` (with the
- *      resolved command), run the executor, append `step_succeeded` /
- *      `step_failed`;
+ *   3. `run_step` → resolve the step, look up the executor registered for its
+ *      type, append `step_dispatched` (with the resolved per-kind payload), run
+ *      the executor, append `step_succeeded` / `step_failed`;
  *   4. `open_gate` → append `gate_opened` and stop: the run is genuinely waiting
  *      for a command, so there is nothing to loop for;
  *   5. `decide_gate` → append the validated `gate_decided` and continue, letting
@@ -80,8 +82,14 @@ export interface TickDeps {
   workflow: WorkflowDefinition;
   /** The run's append-only event log — read at the loop top, appended to. */
   log: EventLog;
-  /** The executor that runs a resolved step's command. */
-  executor: Executor;
+  /**
+   * Executor registry, keyed by step type. The harness routes each `run_step`
+   * decision to the executor registered for the named step's type; a dispatch
+   * for an unregistered type throws before anything is appended, so a
+   * misconfigured registry never leaves a dangling dispatch. `decide` stays
+   * type-blind — it names steps, never executors.
+   */
+  executors: Partial<Record<ResolvedStep['type'], Executor>>;
   /** Absolute path to the run directory; the executor's working directory. */
   runDir: string;
   /**
@@ -125,7 +133,7 @@ export interface TickDeps {
  * @throws if the log has no `run_created` event (an uncreated run can't tick).
  */
 export async function tick(deps: TickDeps): Promise<void> {
-  const { workflow, log, executor, runDir, tracker, readCursor, writeCursor } =
+  const { workflow, log, executors, runDir, tracker, readCursor, writeCursor } =
     deps;
   const now = deps.now ?? (() => new Date().toISOString());
 
@@ -166,13 +174,42 @@ export async function tick(deps: TickDeps): Promise<void> {
 
     if (decision.kind === 'run_step') {
       const step = stepOf(workflow, decision.stepId);
-      const command = resolveCommand(workflow, step, events);
-      append({ type: 'step_dispatched', stepId: step.id, command });
+      // Compose the dispatchable step ONCE, at dispatch: an agent step gets the
+      // engine contract block appended to its resolved prompt here, so the
+      // prompt recorded on `step_dispatched` is byte-identical to the prompt
+      // the executor sends. Replay reads a completed step's recorded payload
+      // back from the log (via the fold) — it is never re-resolved or
+      // re-composed (#60's replay invariant).
+      const resolved = withContractBlock(resolveStep(workflow, step, events));
 
-      const result = await executor.run(
-        { id: step.id, command, produces: step.produces },
-        { runDir },
+      // Look up the executor BEFORE appending step_dispatched: a misconfigured
+      // registry must fail loudly without leaving a dangling dispatch in the
+      // log (which would otherwise unwind to pending and re-dispatch forever).
+      const executor = executors[resolved.type];
+      if (executor === undefined) {
+        throw new Error(
+          `no executor registered for step type '${resolved.type}' (step '${step.id}')`,
+        );
+      }
+
+      append(
+        resolved.type === 'script'
+          ? {
+              type: 'step_dispatched',
+              stepId: step.id,
+              stepType: 'script',
+              command: resolved.command,
+            }
+          : {
+              type: 'step_dispatched',
+              stepId: step.id,
+              stepType: 'agent',
+              prompt: resolved.prompt,
+              ...(resolved.model !== undefined && { model: resolved.model }),
+            },
       );
+
+      const result = await executor.run(resolved, { runDir });
 
       if (result.ok) {
         append({
@@ -397,17 +434,35 @@ function runIdOf(events: readonly EngineEvent[]): string {
 }
 
 /**
- * Find the script step a `run_step` decision names, or throw. `decide` only ever
- * names a script step for `run_step` (gate steps advance via the gate-decision
- * moves); the type narrowing makes that contract explicit at the dispatch site.
+ * Append the engine contract block to an agent step's resolved prompt
+ * ({@link composeAgentPrompt}, ADR-0009): the declared artifact paths it must
+ * write, stay-in-run-dir, no commits/pushes. A non-agent step passes through
+ * untouched — scripts carry no prompt to compose.
  */
-function stepOf(workflow: WorkflowDefinition, stepId: string): ScriptStep {
+function withContractBlock(resolved: ResolvedStep): ResolvedStep {
+  if (resolved.type !== 'agent') return resolved;
+  return {
+    ...resolved,
+    prompt: composeAgentPrompt(resolved.prompt, resolved.produces),
+  };
+}
+
+/**
+ * Find the dispatchable step a `run_step` decision names, or throw. `decide`
+ * only ever names a non-gate step for `run_step` (gate steps advance via the
+ * gate-decision moves); the type narrowing makes that contract explicit at the
+ * dispatch site.
+ */
+function stepOf(
+  workflow: WorkflowDefinition,
+  stepId: string,
+): ScriptStep | AgentStep {
   const step = workflow.steps.find((s) => s.id === stepId);
   if (step === undefined) {
     throw new Error(`decide named unknown step '${stepId}'`);
   }
-  if (!isScriptStep(step)) {
-    throw new Error(`decide named non-script step '${stepId}' for run_step`);
+  if (isGateStep(step)) {
+    throw new Error(`decide named gate step '${stepId}' for run_step`);
   }
   return step;
 }
