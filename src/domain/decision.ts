@@ -69,6 +69,18 @@ export interface StepState {
   decision?: GateDecision;
   /** Revision feedback from a `request_changes` decision, once recorded. */
   feedback?: string;
+  /**
+   * The agent's final message, carried from the terminal `step_succeeded` /
+   * `step_failed` event (ADR-0009). Only agent steps ever set it; a script step
+   * leaves it omitted. Sibling task #74 renders it on the review card from here.
+   */
+  summary?: string;
+  /**
+   * An opaque reference to the agent's session, carried from the terminal step
+   * event when present. Plumbed-but-unpopulated for now — no executor sources it
+   * yet (its cheap source, codex's `--json` stream, is discarded).
+   */
+  sessionRef?: string;
 }
 
 /**

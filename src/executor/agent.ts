@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { ProducedArtifact } from '../workflow/schema.js';
 import { captureDeclaredArtifacts } from './capture.js';
 import type {
@@ -73,6 +75,16 @@ export function composeAgentPrompt(
 export const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
+ * File codex writes its final agent message into via `--output-last-message`
+ * (ADR-0009). It lives inside the run dir so the `--sandbox workspace-write`
+ * root (pinned by `-C runDir`) can write it, and is dot-prefixed and NOT a
+ * declared `produces` artifact so {@link captureDeclaredArtifacts} never treats
+ * it as run output. The executor clears any stale copy before each spawn and
+ * reads it back after the child closes, on both success and failure.
+ */
+export const LAST_MESSAGE_FILE = '.codex-last-message.txt';
+
+/**
  * The slice of a spawned child the agent executor needs: kill, and the `error`
  * / `close` lifecycle events. `node:child_process`'s `ChildProcess` satisfies
  * it structurally; tests substitute a fake.
@@ -134,12 +146,32 @@ export function createAgentExecutor(
         };
       }
 
-      const exit = await runCodex(spawnFn, step, ctx.runDir, timeoutMs);
+      const lastMessageFile = join(ctx.runDir, LAST_MESSAGE_FILE);
+      // Clear any final message left by a prior attempt so a spawn failure can
+      // never attach a stale summary — after the child closes, a file present
+      // here was written by this invocation.
+      await rm(lastMessageFile, { force: true });
+
+      const exit = await runCodex(
+        spawnFn,
+        step,
+        ctx.runDir,
+        lastMessageFile,
+        timeoutMs,
+      );
+      // Read the final message on BOTH outcomes: a failed agent step can still
+      // have written one before exiting non-zero.
+      const summary = await readLastMessage(lastMessageFile);
+
       if (!exit.ok) {
-        return { ok: false, error: exit.error };
+        return withSummary({ ok: false, error: exit.error }, summary);
       }
 
-      return captureDeclaredArtifacts(step.produces, ctx.runDir);
+      const captured = await captureDeclaredArtifacts(
+        step.produces,
+        ctx.runDir,
+      );
+      return withSummary(captured, summary);
     },
   };
 }
@@ -155,10 +187,11 @@ type CodexResult = { ok: true } | { ok: false; error: string };
  * (verified against codex v0.137.0, ADR-0009): `-C <runDir>` pins the working
  * root to the run dir, `--sandbox workspace-write` bounds the blast radius,
  * `--skip-git-repo-check` because a run dir is not a git repo, `--json` selects
- * JSONL event output (discarded via `stdio: 'ignore'` — `summary`/`sessionRef`
- * are the next slice's concern), `-m <model>` only when the step sets one, and
- * the already-composed prompt as the final argument — exactly the bytes
- * recorded on `step_dispatched`.
+ * JSONL event output (discarded via `stdio: 'ignore'`; sourcing `sessionRef`
+ * from it stays out of scope), `-o <lastMessageFile>` captures the agent's
+ * final message into a file the executor reads back as `summary`, `-m <model>`
+ * only when the step sets one, and the already-composed prompt as the final
+ * argument — exactly the bytes recorded on `step_dispatched`.
  *
  * A wall-clock timer kills a hung child with SIGKILL; the kill surfaces as a
  * timeout failure, not a bare signal exit. Never rejects: a spawn error, a
@@ -168,6 +201,7 @@ function runCodex(
   spawnFn: AgentSpawn,
   step: ResolvedAgentStep,
   runDir: string,
+  lastMessageFile: string,
   timeoutMs: number,
 ): Promise<CodexResult> {
   const args = [
@@ -178,6 +212,8 @@ function runCodex(
     'workspace-write',
     '--skip-git-repo-check',
     '--json',
+    '-o',
+    lastMessageFile,
     ...(step.model !== undefined ? ['-m', step.model] : []),
     step.prompt,
   ];
@@ -225,4 +261,33 @@ function runCodex(
       resolvePromise({ ok: true });
     });
   });
+}
+
+/**
+ * Read codex's `--output-last-message` file back as the agent's `summary`.
+ * Returns `undefined` when the file is absent (codex wrote none) or empty, so
+ * the field is omitted rather than set to an empty string. Surrounding
+ * whitespace is trimmed; a missing file is an expected outcome, never an error.
+ */
+async function readLastMessage(
+  lastMessageFile: string,
+): Promise<string | undefined> {
+  try {
+    const message = (await readFile(lastMessageFile, 'utf8')).trim();
+    return message === '' ? undefined : message;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Merge a captured `summary` onto an {@link ExecutorResult} without setting the
+ * key to `undefined` (which `exactOptionalPropertyTypes` forbids). Preserves the
+ * result's `ok` discriminant and its success/failure payload.
+ */
+function withSummary(
+  result: ExecutorResult,
+  summary: string | undefined,
+): ExecutorResult {
+  return summary === undefined ? result : { ...result, summary };
 }

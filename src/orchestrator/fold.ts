@@ -131,6 +131,12 @@ export function foldRunState(
             stepId: event.stepId,
             status: 'succeeded',
             artifacts: event.artifacts,
+            // Agent metadata (ADR-0009), carried onto the step only when the
+            // terminal event bore it — script steps leave both omitted.
+            ...(event.summary !== undefined && { summary: event.summary }),
+            ...(event.sessionRef !== undefined && {
+              sessionRef: event.sessionRef,
+            }),
           },
           steps[event.stepId]?.command,
         );
@@ -144,6 +150,10 @@ export function foldRunState(
             stepId: event.stepId,
             status: 'failed',
             reason: event.reason,
+            ...(event.summary !== undefined && { summary: event.summary }),
+            ...(event.sessionRef !== undefined && {
+              sessionRef: event.sessionRef,
+            }),
           },
           steps[event.stepId]?.command,
         );

@@ -80,10 +80,25 @@ export interface RunContext {
  * The result of executing a step. A success carries the captured artifact index
  * entries (mapped to `step_succeeded`); a failure carries a human-readable
  * reason (mapped to `step_failed`).
+ *
+ * Both variants may also carry agent metadata the harness threads onto the
+ * terminal step event (ADR-0009):
+ *  - `summary` — the agent's final message, captured from codex's
+ *    `--output-last-message` file on either outcome; a script executor never
+ *    sets it, so it stays omitted (not `undefined`) under
+ *    `exactOptionalPropertyTypes`.
+ *  - `sessionRef` — an opaque session reference, plumbed-but-unpopulated: its
+ *    only cheap source (codex's `--json` stream) is discarded, so no executor
+ *    sets it yet.
  */
 export type ExecutorResult =
-  | { ok: true; artifacts: ArtifactIndexEntry[] }
-  | { ok: false; error: string };
+  | {
+      ok: true;
+      artifacts: ArtifactIndexEntry[];
+      summary?: string;
+      sessionRef?: string;
+    }
+  | { ok: false; error: string; summary?: string; sessionRef?: string };
 
 /** The executor interface. One method, behind which all side effects live. */
 export interface Executor {
