@@ -1038,6 +1038,96 @@ steps:
       }
     });
 
+    it('threads the agent executor summary onto step_succeeded', async () => {
+      const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku'
+`);
+      const { runDir, log } = seedRun(workflow, [created()]);
+      const executor: Executor = {
+        run: () =>
+          Promise.resolve({
+            ok: true,
+            artifacts: [],
+            summary: 'Wrote the haiku.',
+          }),
+      };
+
+      await tick({
+        workflow,
+        log,
+        executors: { agent: executor },
+        runDir,
+        now,
+      });
+
+      const succeeded = log.read().find((e) => e.type === 'step_succeeded');
+      expect(succeeded?.type).toBe('step_succeeded');
+      if (succeeded?.type === 'step_succeeded') {
+        expect(succeeded.summary).toBe('Wrote the haiku.');
+      }
+    });
+
+    it('threads the agent executor summary onto step_failed', async () => {
+      const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku'
+`);
+      const { runDir, log } = seedRun(workflow, [created()]);
+      const executor: Executor = {
+        run: () =>
+          Promise.resolve({
+            ok: false,
+            error: 'codex exited with code 3',
+            summary: 'Got stuck on the second stanza.',
+          }),
+      };
+
+      await tick({
+        workflow,
+        log,
+        executors: { agent: executor },
+        runDir,
+        now,
+      });
+
+      const failed = log.read().find((e) => e.type === 'step_failed');
+      expect(failed?.type).toBe('step_failed');
+      if (failed?.type === 'step_failed') {
+        expect(failed.reason).toBe('codex exited with code 3');
+        expect(failed.summary).toBe('Got stuck on the second stanza.');
+      }
+    });
+
+    it('leaves a script step_succeeded free of agent metadata keys', async () => {
+      const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: greet
+    type: script
+    run: 'printf hi > {{artifacts.out.path}}'
+    produces:
+      - id: out
+        path: artifacts/out.txt
+`);
+      const { runDir, log } = seedRun(workflow, [created()]);
+
+      await tick({ workflow, log, executors, runDir, now });
+
+      const succeeded = log.read().find((e) => e.type === 'step_succeeded');
+      expect(succeeded?.type).toBe('step_succeeded');
+      // The script executor returns no agent metadata, so the fields are omitted
+      // entirely (not set to undefined) and the event shape is unchanged.
+      expect(succeeded && 'summary' in succeeded).toBe(false);
+      expect(succeeded && 'sessionRef' in succeeded).toBe(false);
+    });
+
     it('fails loudly on a step type with no registered executor, appending no dispatch', async () => {
       const workflow = loadWorkflow(`
 slug: tiny-smoke
