@@ -8,6 +8,7 @@ import {
   type AgentSpawn,
   composeAgentPrompt,
   createAgentExecutor,
+  LAST_MESSAGE_FILE,
 } from './agent.js';
 import type { ResolvedAgentStep } from './types.js';
 
@@ -143,6 +144,19 @@ describe('agentExecutor', () => {
     };
   }
 
+  /**
+   * A child that writes `message` into the `--output-last-message` file (as the
+   * real codex would) and then closes with `code` — so a test can drive the
+   * executor's final-message read path on either outcome.
+   */
+  const writeMessageThenExit =
+    (message: string, code: number) =>
+    (child: FakeChild): void => {
+      void writeFile(join(runDir, LAST_MESSAGE_FILE), message, 'utf8').then(
+        () => child.emit('close', code, null),
+      );
+    };
+
   it('spawns codex exec with the exact flag surface and the prompt as the final argument', async () => {
     const { spawnFn, calls } = fakeSpawn(exitWith(0));
     const executor = createAgentExecutor({ spawnFn });
@@ -163,6 +177,8 @@ describe('agentExecutor', () => {
       'workspace-write',
       '--skip-git-repo-check',
       '--json',
+      '-o',
+      join(runDir, LAST_MESSAGE_FILE),
       '-m',
       'smart-model',
       'Write a haiku.',
@@ -183,6 +199,8 @@ describe('agentExecutor', () => {
       'workspace-write',
       '--skip-git-repo-check',
       '--json',
+      '-o',
+      join(runDir, LAST_MESSAGE_FILE),
       'Write a haiku.',
     ]);
   });
@@ -210,6 +228,51 @@ describe('agentExecutor', () => {
     expect(artifact?.sha256).toBe(
       createHash('sha256').update(bytes).digest('hex'),
     );
+  });
+
+  it('reads the codex final message into summary on a zero exit', async () => {
+    const { spawnFn } = fakeSpawn(
+      writeMessageThenExit('Wrote the draft; see draft.md.\n', 0),
+    );
+    const executor = createAgentExecutor({ spawnFn });
+
+    const result = await executor.run(agentStep(), { runDir });
+
+    expect(result.ok).toBe(true);
+    expect(result.summary).toBe('Wrote the draft; see draft.md.');
+  });
+
+  it('reads the final message into summary even when the step fails', async () => {
+    const { spawnFn } = fakeSpawn(
+      writeMessageThenExit('Got stuck on the second stanza.', 3),
+    );
+    const executor = createAgentExecutor({ spawnFn });
+
+    const result = await executor.run(agentStep(), { runDir });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/exited with code 3/);
+    expect(result.summary).toBe('Got stuck on the second stanza.');
+  });
+
+  it('omits summary when codex writes no final message', async () => {
+    const { spawnFn } = fakeSpawn(exitWith(0));
+    const executor = createAgentExecutor({ spawnFn });
+
+    const result = await executor.run(agentStep(), { runDir });
+
+    expect(result.ok).toBe(true);
+    expect(result.summary).toBeUndefined();
+  });
+
+  it('never populates sessionRef (its cheap source is discarded)', async () => {
+    const { spawnFn } = fakeSpawn(writeMessageThenExit('done', 0));
+    const executor = createAgentExecutor({ spawnFn });
+
+    const result = await executor.run(agentStep(), { runDir });
+
+    expect(result.sessionRef).toBeUndefined();
   });
 
   it('fails when a declared artifact is missing after a zero exit', async () => {
