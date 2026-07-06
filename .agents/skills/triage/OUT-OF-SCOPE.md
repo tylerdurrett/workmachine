@@ -83,9 +83,18 @@ The maintainer may:
 
 ## When to write to `.out-of-scope/`
 
-Only when an **enhancement** (not a bug) is rejected as `wontfix`. The flow:
+Writing a file here is **opt-in, never automatic.** Closing a `wontfix` issue with
+a comment already preserves the reasoning — the closed issue is itself the record.
+Reserve `.out-of-scope/` for the narrower case where the maintainer explicitly wants
+the rejection memorialized in-tree because it's *durable and likely to recur* (the
+kind of request you're tired of re-litigating). A one-off "not now" is a **deferral**,
+not an out-of-scope rejection — leave it as a `deferred` issue; do not create a file.
 
-1. Maintainer decides a feature request is out of scope
+So: when an **enhancement** (not a bug) is rejected as `wontfix`, default to
+close-with-comment, and **ask first** before adding any file. Only on an explicit yes,
+run the flow:
+
+1. Maintainer confirms they want the rejection recorded in-tree
 2. Check if a matching `.out-of-scope/` file already exists
 3. If yes: append the new issue to the "Prior requests" list
 4. If no: create a new file with the concept name, decision, reason, and first prior request

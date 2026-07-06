@@ -4,27 +4,23 @@ Decisions intentionally deferred past the first vertical slice. Each is
 real and load-bearing; none blocks slice 1. Promote into an ADR (and the
 canonical docs) when resolved.
 
-## 1. The agent executor — how an agent step actually runs
+## 1. The agent executor — how an agent step actually runs ✅ RESOLVED
 
-The first slice has only a `script` executor. Two of the three tenants
-(the fan-out researcher, the dev-skills replacement) and most video
-steps need an `agent` executor. The architecture already places it
-cleanly: an agent step is just an `Executor` (ADR-0003) — non-determinism
-is fine because executors are the side-effecting layer, and "thin skill,
-thick engine" means the engine resolves inputs, hands the agent exactly
-one narrow creative task plus the resolved input artifacts, and the agent
-never touches run lifecycle, gates, or "what's next."
+Resolved 2026-06-09 by [ADR-0009](adr/0009-agent-steps-run-codex-cli-llm-steps-deferred.md)
+and the CONTEXT.md vocabulary (*Agent step*, *LLM step (deferred)*):
 
-Unresolved:
-
-- **Invocation mechanism:** Claude Code headless (`claude -p` / the
-  Agent SDK), the Claude Agent SDK directly (TS-native), or a Hermes
-  profile. Lean is the TS Agent SDK for first-class typing, but undecided.
-- **Artifact contract enforcement:** how the engine guarantees an agent
-  produced its declared `produces` artifacts (structured output? a
-  post-step validator? re-prompt on miss?).
-- **Failure/retry semantics:** how agent errors and partial output map to
-  `step_failed`, and what (if anything) retries.
+- **Invocation mechanism:** Codex CLI (`codex exec`, subprocess) under
+  subscription auth. The Claude Agent SDK was rejected on pricing (no
+  longer subscription-countable). "Choosable models via the Vercel AI
+  SDK" turned out to be a *different step kind* (the deferred LLM step),
+  not a backend of this one.
+- **Artifact contract enforcement:** deterministic only — the executor
+  appends a contract block to every resolved prompt, and a post-exit
+  existence check maps any missing declared artifact to `step_failed`
+  (the script executor's existing rule). No re-prompt loops.
+- **Failure/retry semantics:** all failures (exit/spawn, missing
+  artifact, timeout) are `step_failed` facts; retry is a pure `decide`
+  policy via optional `retries: N` (default 0), every attempt log-visible.
 
 ## 2. Dynamic fan-out — the researcher spawning a data-dependent N
 

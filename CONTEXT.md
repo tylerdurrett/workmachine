@@ -16,6 +16,8 @@ Work Machine coordinates tracker-backed workflow runs across human review, agent
 - **Tracker adapter** — integration that projects run state into an issue/card surface and reads human commands back from that surface, behind a small `createRunCard` / `renderReviewCard` / `readCommands` / `postComment` interface with an in-memory fake for tests. The first implementation is GitHub Issues over raw `fetch` (not Octokit), with explicit ETag conditional polling; the target repo is operator-supplied per run via `run create --repo owner/name` (falling back to `WORKMACHINE_SANDBOX_REPO` in local dev), never a global tracker. The GitHub credential is the one global secret, `WORKMACHINE_GITHUB_TOKEN`. See [ADR-0008](docs/adr/0008-github-tracker-adapter-raw-fetch-operator-supplied-repo.md).
 - **Tracker surface** — the human-visible issue/card where status, artifacts, discussion, and commands live.
 - **Executor adapter** — implementation of a step type such as `script`, `agent`, `human`, or `noop`. The only place side effects are allowed.
+- **Agent step** — a step executed by an autonomous **agent harness**: a multi-turn loop with file tools and a shell, working inside the run dir. The engine resolves the prompt and hands the harness one narrow task; the *harness* writes the declared artifacts to disk. The first harness is the Codex CLI (`codex exec`, subprocess), chosen because it rides subscription auth rather than metered API billing. Distinct from the LLM step below — the load-bearing difference is *who writes the artifact*.
+- **LLM step (deferred)** — a single resolved-prompt model completion (no tools, no filesystem) where the *engine* captures the response and writes the artifact itself. Per-step model choice (e.g. via the Vercel AI SDK) lives here, as does the unresolved metered-API auth story. Cheap and fast — the natural unit for fan-out sub-calls. Not in scope for the first agent-executor feature.
 - **Worker** — process or machine that executes runnable steps. Starts local; may become cloud/GPU-capability-aware later.
 - **Artifact index** — machine-readable metadata for outputs such as file paths, sizes, hashes, URLs, and validation state.
 - **Gate** — a coordinator-owned wait state that requires a command, commonly a human tracker command like `/approve`. A step that carries a gate is a **review step**.
@@ -38,6 +40,7 @@ Work Machine coordinates tracker-backed workflow runs across human review, agent
 - First worker: local process on Tyler's machine.
 - First artifact backend: local filesystem plus artifact index.
 - First workflow proof: one tiny script step plus one human approval gate.
+- First agent harness: Codex CLI (`codex exec`), subscription-authenticated. The Claude Agent SDK was rejected on pricing (no longer counts against a subscription).
 
 ## Flagged ambiguities
 

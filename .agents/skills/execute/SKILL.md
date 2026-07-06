@@ -3,25 +3,13 @@ name: execute
 description: Implement a `size:task` spec end-to-end on a branch off the parent's integration branch and open the PR with `Closes #<N>`. Use when the user says "execute #<N>", "tackle #<N>", "ship task #<N>", or points at a `size:task` issue labeled `ready-for-agent`. Use `/decompose` instead for larger sizes (`size:slice`, `size:feature`, `size:initiative`).
 ---
 
+*Batch-mode agents: read [BATCH.md](BATCH.md) instead of this file — it is the /batch-facing subset of Steps 1–6 and 7–9. Keep the two in sync when editing either.*
+
 # Execute
 
 Ship a task: read the brief, branch off the right base, implement, commit per cohesive unit, open a PR.
 
 This skill handles every `size:task` spec regardless of parent. Tasks can sit directly under a slice, under a feature with no intervening slice, or be orphans. `/decompose` is the upstream counterpart that produces tasks from a larger spec; the two skills cover disjoint sizes and refuse to run on the wrong size label.
-
-## Running under `/batch`
-
-Solo, this skill's outer agent does the housekeeping (Steps 1–6), spawns **one** implementation sub-agent (Step 7) so the coding runs in a clean context, then reviews and opens the PR (Steps 7-review–9). `/batch` cannot nest that sub-agent — a batch leaf is already a sub-agent. So instead of collapsing everything into one overloaded context, `/batch` **decomposes this skill across three sibling workflow agents**, preserving — and sharpening — the clean-context separation:
-
-| Batch stage | Maps to | Context |
-| --- | --- | --- |
-| **Prep** | Steps 1–6 (validate, walk parent chain, explore, plan, branch) + push the empty branch to origin. Skips the Step 5 approval halt — the batch was approved as a whole. | Heavy bookkeeping; allowed. |
-| **Implement** | Step 7's inner loop only: per sub-section implement → `pnpm typecheck`/`lint:fix`/`format:fix` → `/simplify` → one commit. Pushes commits to origin. | **Clean** — sees only the brief, the plan's sub-sections, the branch, conventions. Exactly Step 7's intent. |
-| **Land** | Step 7-review + Step 8 (verify acceptance criteria first-hand) + Step 9 (open PR), then `/ship` if a batched task depends on this one. | Fresh reviewer. |
-
-State flows through the workflow's structured returns (plan, branch) and through origin (each stage fetches the branch). No leaf ever holds the whole job at once.
-
-Three rules hold across all three stages, overriding any solo behavior: **never halt for human approval** (the batch was approved up front); **never invoke `/triage`** (`/batch` only hands over OPEN + `ready-for-agent` + `size:task` tasks — if a label gap or the Step 4 size escape-hatch is hit anyway, return a `blocker` instead); and **never promote upward** beyond the `/ship` the Land stage is explicitly told to run.
 
 ## Base branch: parent's integration branch (per the integration-branch ADR)
 
@@ -109,19 +97,34 @@ git ls-remote --heads origin <base-branch>
 
 - Present, continue.
 - Empty for `main`, impossible state; surface and stop.
-- Empty for a non-`main` integration branch, create it lazily on the remote, forking from the next-level-up integration branch in the chain (or `main` if the chain terminates above `<declaring-parent>`):
+- Empty for a non-`main` integration branch, create it lazily on the remote. Its fork source is the next-level-up integration branch in the chain (or `main` if the chain terminates above `<declaring-parent>`) — but that ancestor may itself never have been seeded (e.g. this is the first task under the first slice of a brand-new feature, so the feature branch doesn't exist on origin yet). Creation therefore **recurses**: ensure every missing ancestor branch exists before forking the child from it, bottoming out at `main`. This is ADR-0001's "recurse upward" rule applied to branch *creation*, not just to the declaration walk `resolve_base_branch` already does.
 
   ```bash
-  read fork_source _ < <(resolve_base_branch "$declaring_parent")
-  git fetch origin "$fork_source"
-  git push origin "origin/$fork_source:refs/heads/<base-branch>"
+  # Ensure the integration branch <branch> (declared by issue <decl>) exists on
+  # origin, recursively creating any missing ancestor first so the fork source is
+  # always present. Idempotent: an existing branch is reused. `main` is terminal.
+  ensure_integration_branch() {
+    local branch=$1 decl=$2
+    [ "$branch" = "main" ] && return 0
+    if [ -n "$(git ls-remote --heads origin "$branch")" ]; then
+      echo "Reusing existing integration branch $branch on origin" >&2
+      return 0
+    fi
+    # Fork source = nearest declared integration branch above <decl> (or main).
+    local fork_source fork_decl
+    read fork_source fork_decl < <(resolve_base_branch "$decl")
+    ensure_integration_branch "$fork_source" "$fork_decl"   # seed the chain first
+    git fetch origin "$fork_source"
+    git push origin "origin/$fork_source:refs/heads/$branch"
+    echo "Created integration branch $branch on origin from origin/$fork_source" >&2
+  }
+
+  ensure_integration_branch "$base_branch" "$declaring_parent"
   ```
 
-  This forks the integration branch off the freshest upstream branch at the moment the first child task starts. Print one of:
-  - `"Created integration branch <base-branch> on origin from origin/<fork-source>"` (just-created)
-  - `"Reusing existing integration branch <base-branch> on origin"` (already there from a prior run)
+  Each branch forks off the freshest upstream branch at the moment the first child task starts, and the entire missing chain (feature → slice → …) is seeded at that one point. The function is idempotent, so concurrent first-tasks and re-runs are safe.
 
-  A failed push (permissions, network) is a stop condition. Surface the error and halt. Either path (`/decompose` on the parent slice, `/execute` on the first task) seeds the integration branch on first use, so neither blocks on the other having run first.
+  A failed push (permissions, network) is a stop condition. Surface the error and halt. **Never silently fall back to forking `<base-branch>` off `main` when an ancestor integration branch is missing** — that flattens the hierarchy and makes the eventual slice/feature promotion diff wrong; create the missing ancestor instead. Either path (`/decompose` on the parent slice, `/execute` on the first task) seeds the integration branch on first use, so neither blocks on the other having run first.
 
 ## Step 3: Verify clean working tree and sync base branch
 
@@ -159,7 +162,7 @@ Write a concise plan in chat (no `.plans/` file; task work is ephemeral and inli
 - **Critical files**: the file paths to be modified, with one-line notes.
 - **Verification**: how the change is checked: `pnpm typecheck`, `pnpm lint:fix`, `pnpm format:fix`, `pnpm test`, manual smoke if needed.
 
-Stop and let the user approve, redirect, or ask questions. **Do not branch yet.** (Exception: when this is the Prep stage of [a `/batch` run](#running-under-batch), skip this halt and proceed straight to branching — the batch was approved as a whole.)
+Stop and let the user approve, redirect, or ask questions. **Do not branch yet.**
 
 ## Step 6: Branch
 
@@ -184,8 +187,6 @@ If the branch already exists locally (left over from a prior failed attempt), st
 ## Step 7: Delegate the implementation to a sub-agent
 
 The main (outer) agent does **not** write the code. It has already done the housekeeping — resolved the base branch, synced, explored, planned, branched — and it owns the review and PR steps that follow. The actual coding happens in a single sub-agent (via the `Agent` tool) so the implementation work runs in a clean context, free of the bookkeeping above.
-
-**Under [a `/batch` run](#running-under-batch), this delegation is hoisted into the workflow:** the Prep stage stops after Step 6, and the Implement stage *is* this clean sub-agent, run as a sibling workflow agent rather than nested here. The per-sub-section loop below is exactly what that stage performs.
 
 Spawn one sub-agent for the whole implementation. Hand it everything it needs to work without re-deriving context:
 

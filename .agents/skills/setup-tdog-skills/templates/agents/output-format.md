@@ -63,7 +63,6 @@ If the skill genuinely terminates the chain (no follow-up applies), omit the blo
 These skills' entire output IS the report. They don't follow the three-block shape:
 
 - **`/status`**: its own multi-section warm-prose report. Reads like a status update for a stakeholder; voice rules below still apply.
-- **`/how-to-use`**: verbatim user manual. No closing remark.
 - **`/triage`** in conversational mode (e.g. "show what needs attention"): prose-driven survey, ends with a recommendation embedded in the body.
 - **`/grill-with-docs`**: interview format, ends when control returns to the user. No canonical wrap-up line.
 - **`/check`**: terminal `## Findings` block is the structured artifact `/audit` parses. The conversational lead-up is the report; the Findings block is the contract.
@@ -153,10 +152,6 @@ Filed two cleanup specs.
 
 Stop.
 ```
-
-### A `/how-to-use` run
-
-The whole user manual is printed verbatim. No outcome line, no links block, no next step.
 
 ### A `/status` run
 

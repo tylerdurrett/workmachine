@@ -14,7 +14,7 @@ For the system shape see [docs/agents/README.md](../../../docs/agents/README.md)
 ## Hard rules
 
 - **Read-only.** No `git commit`, `git push`, `gh issue close`, `gh pr edit`, `gh pr create`, file deletions, or label edits. Use only read-shaped `gh` and `git` commands. If the survey turns up state that needs fixing (e.g., a slice labeled `in-progress` with all children closed), recommend the relevant skill; do not fix it yourself.
-- **Recommend from the lifecycle.** The next-step recommendation must be one of: `/grill-with-docs`, `/to-spec`, `/triage`, `/decompose`, `/execute`, `/ship`. Do not recommend `/check`, `/audit`, `/diagnose`, `/improve-codebase-architecture`, `/tdd`, or other ad-hoc skills; they do not fit the "what's next" question this skill answers. `/check` and `/audit` are optional verification reached for directly by the maintainer (or via the nudge `/decompose` prints), not from a `/status` recommendation.
+- **Recommend from the lifecycle.** The next-step recommendation must be one of: `/grill-with-docs`, `/to-spec`, `/triage`, `/decompose`, `/autopilot`, `/execute`, `/ship`. `/autopilot` applies only to a triaged, `ready-for-agent` `size:slice`, offered as the autonomous alternative to `/decompose` (run the whole slice end-to-end). Do not recommend `/check`, `/audit`, `/diagnose`, `/improve-codebase-architecture`, `/tdd`, or other ad-hoc skills; they do not fit the "what's next" question this skill answers. `/check` and `/audit` are optional verification reached for directly by the maintainer (or via the nudge `/decompose` prints), not from a `/status` recommendation.
 - **One headline action.** Exactly one recommendation under "What to do next." Supporting context lives in the other sections.
 - **Voice rules apply.** This skill is one of the report-is-output exceptions in [output-format.md](../../../docs/agents/output-format.md#skills-that-are-exceptions-to-the-template); the three-block template does not apply, but the voice rules in that file do (plain English over jargon, lead with the thing being built, no conventional-commit prefixes, compress related artifacts, be specific).
 
@@ -107,7 +107,7 @@ Pick the first match top-down. Each match resolves to exactly one recommended sk
 
 7. **A `ready-for-agent` spec exists** with no open PR yet. Branch on its size label:
    - `size:task` → **`/execute <N>`** (one PR's worth; the skill explores, plans inline, branches, commits, opens a PR with `Closes #<N>`).
-   - `size:slice` → **`/decompose <N>`** (needs to be broken into task children first).
+   - `size:slice` → **`/decompose <N>`** (needs to be broken into task children first), or **`/autopilot <N>`** to run the whole slice autonomously (decompose → audit → triage tasks → batch, halting only on a blocking audit finding).
 
 8. **A `size:feature` or `size:initiative` exists with no state-axis label and zero sub-issues** → **`/decompose <N>`**. (Decompose-ready per [triage-labels.md §Size axis](../../../docs/agents/triage-labels.md#size-axis): features and initiatives skip `ready-for-agent` because they decompose, not execute.)
 

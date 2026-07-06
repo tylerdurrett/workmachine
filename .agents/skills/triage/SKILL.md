@@ -3,6 +3,8 @@ name: triage
 description: Verify the size `/to-spec` picked, lay down per-tier bookkeeping (integration branch declaration, sticky progress comment), apply the next state label, and clear `needs-triage`. Also surfaces what's most actionable across the tracker when invoked without a specific spec. Use after `/to-spec` publishes a spec, when picking up a hand-created spec, or when asking "what should I look at next?"
 ---
 
+*Pipeline agents (running under /autopilot): read [PIPELINE.md](PIPELINE.md) instead of this file — it is the autopilot-facing subset. Keep the two in sync when editing either.*
+
 # Triage
 
 The bookkeeping pass that turns a freshly-published spec into a fully-functional tracker artifact, and a conversational survey of what's most actionable across the queue.
@@ -53,10 +55,15 @@ Clear `needs-triage` and apply one of the seven canonical state labels (or, for 
 | Size | New state | Next step |
 | ---- | --------- | --------- |
 | `size:task` | `ready-for-agent` | `/execute <N>` |
-| `size:slice` | `ready-for-agent` | `/decompose <N>` |
+| `size:slice` | `ready-for-agent` | `/decompose <N>` (or `/autopilot <N>` to run the whole slice autonomously) |
 | `size:feature` / `size:initiative` | *(no state label)* | `/decompose <N>` |
 
 `size:feature` and `size:initiative` skip `ready-for-agent` because they decompose, not execute (see [triage-labels.md §Size axis](../../../docs/agents/triage-labels.md#size-axis)). For `ready-for-agent` outcomes, post an agent brief comment (see [AGENT-BRIEF.md](AGENT-BRIEF.md)) **only if the spec body is thin**; `/to-spec`-published specs usually make a separate brief redundant.
+
+Two hygiene rules for anything you write into a spec or brief — triage notes are load-bearing for the executing agent, and a false claim sends it hunting:
+
+- **Only assert gates that are actually wired.** Before noting "prettier/lint/CI flags this", check the repo defines that gate (a config file, a package.json script). An ad-hoc `npx prettier --check` against a repo with no prettier config produces noise, not a gate — a downstream agent was measured burning minutes chasing exactly that.
+- **Exclude vendored/build dirs from exploratory greps** — `grep -rn --exclude-dir={node_modules,dist,.vite,build}` (or use `rg`, which honors .gitignore). A bare recursive grep over `apps/` once returned 614KB of bundler output for one probe.
 
 **Non-happy path** (any size):
 
@@ -67,7 +74,7 @@ Clear `needs-triage` and apply one of the seven canonical state labels (or, for 
 | `ready-for-human` | Needs judgment, external access, design decisions, or manual testing an agent can't safely do. | Note why in a comment. | Maintainer. |
 | `deferred` | Intentionally parked. | Short comment naming the trigger and the unpark condition. | `Stop.` |
 | `wontfix` (bug) | Will not be actioned. | Polite explanation, close. | `Stop.` |
-| `wontfix` (enhancement) | Will not be actioned. | Write to `.out-of-scope/` and link from the closing comment (see [OUT-OF-SCOPE.md](OUT-OF-SCOPE.md)). | `Stop.` |
+| `wontfix` (enhancement) | Will not be actioned. | Close with a brief explanatory comment — the closed issue **is** the record. Do **not** write a repo file by default. Only when the maintainer explicitly wants the reasoning preserved in-tree for a durable, likely-to-recur rejection (not a deferral — see the `deferred` row), offer to write to `.out-of-scope/`, and do so only on a yes (see [OUT-OF-SCOPE.md](OUT-OF-SCOPE.md)). | `Stop.` |
 
 Apply the transition in one call (omit `--add-label` for `size:feature` / `size:initiative` happy path):
 
@@ -103,7 +110,7 @@ Conversational mode. Walk the tracker and present these buckets in order:
 
 3. **Active features and slices (`in-progress`)**: specs that `/decompose` produced children for. Group by parent. Show the auto-rollup (`X of Y children shipped`). On an `in-progress` `size:slice` with open task children, the recommended next action is `/execute <task#>` on the lowest-numbered open task, not further triage on the slice itself.
 
-4. **`ready-for-agent`**: fully specified, waiting for the next move. Only `size:task` and `size:slice` land here (features and initiatives skip `ready-for-agent`). `/execute <N>` for tasks; `/decompose <N>` for slices.
+4. **`ready-for-agent`**: fully specified, waiting for the next move. Only `size:task` and `size:slice` land here (features and initiatives skip `ready-for-agent`). `/execute <N>` for tasks; `/decompose <N>` for slices (or `/autopilot <N>` to run the whole slice autonomously).
 
    Plus **decompose-ready features and initiatives**: `size:feature` / `size:initiative` carrying no state-axis label after `/triage`'s bookkeeping pass. Recommended action: `/decompose <N>`.
 
@@ -117,7 +124,7 @@ Show counts and a one-line summary per spec. After the buckets, **recommend the 
 
 1. An `in-progress` slice with an open task child → `/execute <task#>` on the lowest-numbered open task.
 2. A `ready-for-agent` `size:task` → `/execute <N>`.
-3. A `ready-for-agent` `size:slice`, or a `size:feature` / `size:initiative` with no state-axis label → `/decompose <N>`.
+3. A `ready-for-agent` `size:slice` → `/decompose <N>` (or `/autopilot <N>` to run the whole slice autonomously); a `size:feature` / `size:initiative` with no state-axis label → `/decompose <N>`.
 4. A `needs-triage` spec → `/triage <N>`.
 5. A `needs-grilling` spec → `/grill-with-docs <N>`.
 

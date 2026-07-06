@@ -43,12 +43,15 @@ completed through GitHub while the event log stays canonical.
 
 ## Phase 2 — Agent executor
 
+- [x] Resolve invocation mechanism: Codex CLI (`codex exec`) under
+      subscription auth; LLM step split off as a distinct deferred kind
+      ([ADR-0009](adr/0009-agent-steps-run-codex-cli-llm-steps-deferred.md)).
 - [ ] `agent` executor under "thin skill, thick engine": engine resolves
       inputs and hands the agent one narrow task; agent never touches
       lifecycle.
-- [ ] Artifact-contract enforcement (declared `produces` actually
-      produced) and agent failure/retry semantics.
-- [ ] Resolve invocation mechanism (see [open-questions.md](open-questions.md) §1).
+- [ ] Artifact-contract enforcement (contract block + post-exit existence
+      check) and failure/retry semantics (`retries: N` folded purely in
+      `decide`).
 
 ## Phase 3 — Multi-gate runs and the parent run card
 
