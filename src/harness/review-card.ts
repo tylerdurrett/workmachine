@@ -92,7 +92,8 @@ export function renderReviewCardBody(
  * its StepState from the terminal `step_succeeded` / `step_failed` event (#73).
  * When present — on a succeeded or a failed step — it renders as an indented
  * continuation under the step's status line, so a reviewer reads what the agent
- * reported without opening its session. Script steps, and agent steps that
+ * reported without opening its session; a multi-line summary is indented
+ * line-by-line so every line stays within that nested list item. Script steps, and agent steps that
  * captured no final message, leave `summary` omitted and keep the plain
  * single-line status format. `sessionRef` is not rendered.
  */
@@ -105,7 +106,8 @@ function renderContext(contextSteps: readonly StepState[]): string[] {
   for (const step of contextSteps) {
     lines.push(`- \`${step.stepId}\` — ${step.status}`);
     if (step.summary !== undefined) {
-      lines.push(`  - ${step.summary}`);
+      const [first = '', ...rest] = step.summary.split('\n');
+      lines.push(`  - ${first}`, ...rest.map((line) => `    ${line}`));
     }
   }
   return lines;
