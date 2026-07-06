@@ -26,6 +26,9 @@ package.
 
 ## Run it yourself
 
+`run create` needs a target tracker repo: set `WORKMACHINE_SANDBOX_REPO=owner/name`
+in the environment, or pass `--repo owner/name` (which overrides the env var).
+
 ```
 pnpm build
 node dist/cli/main.js run create workflows/tiny-smoke-gated/workflow.yaml \

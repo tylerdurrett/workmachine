@@ -52,7 +52,9 @@ declares a single `topic` input — unlike the script fixtures, which thread a
 ## Run it yourself
 
 Requires the real `codex` CLI on `PATH`, logged in (the hermetic smoke in CI
-uses a stub `codex` instead — see `src/integration.smoke.test.ts`).
+uses a stub `codex` instead — see `src/integration.smoke.test.ts`). `run create`
+also needs a target tracker repo: set `WORKMACHINE_SANDBOX_REPO=owner/name` in the
+environment, or pass `--repo owner/name` (which overrides the env var).
 
 ```
 pnpm build
