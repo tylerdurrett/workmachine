@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   isAgentStep,
   isScriptStep,
+  isTemplatedStep,
   type WorkflowDefinition,
 } from './schema.js';
 
@@ -63,9 +64,7 @@ export function validateInterpolationRefs(
   const declaredInputs = new Set(Object.keys(def.inputs));
   const producedIds = new Set(
     def.steps.flatMap((step) =>
-      isScriptStep(step) || isAgentStep(step)
-        ? step.produces.map((a) => a.id)
-        : [],
+      isTemplatedStep(step) ? step.produces.map((a) => a.id) : [],
     ),
   );
 

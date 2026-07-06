@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
-  isAgentStep,
   isScriptStep,
+  isTemplatedStep,
   type WorkflowDefinition,
 } from './schema.js';
 
@@ -62,7 +62,7 @@ export function validateDag(def: WorkflowDefinition): z.ZodIssue[] {
   const producerStepIdByArtifact = new Map<string, string>();
   const seenArtifactIds = new Set<string>();
   def.steps.forEach((step, i) => {
-    if (!isScriptStep(step) && !isAgentStep(step)) return;
+    if (!isTemplatedStep(step)) return;
     step.produces.forEach((artifact, j) => {
       if (seenArtifactIds.has(artifact.id)) {
         issues.push({
@@ -103,7 +103,7 @@ export function validateDag(def: WorkflowDefinition): z.ZodIssue[] {
 
     // Implicit edges from resolved artifact references (script and agent
     // steps only; gate steps carry no templated text or produced paths).
-    if (!isScriptStep(step) && !isAgentStep(step)) return;
+    if (!isTemplatedStep(step)) return;
     const templatedText = isScriptStep(step) ? step.run : step.prompt;
     const refTexts = [templatedText, ...step.produces.map((a) => a.path)];
     for (const text of refTexts) {

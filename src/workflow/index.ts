@@ -10,6 +10,7 @@ export {
   isAgentStep,
   isGateStep,
   isScriptStep,
+  isTemplatedStep,
   workflowSchema,
 } from './schema.js';
 export type {

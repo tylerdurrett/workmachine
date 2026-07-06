@@ -118,6 +118,11 @@ export function foldRunState(
         danglingDispatch.add(event.stepId);
         // Only a script dispatch carries a `command`; an agent dispatch records
         // its resolved `prompt` on the event itself, not in StepState.
+        // `stepType` is a required discriminant on every persisted
+        // `step_dispatched` (see events.ts → StepDispatchedBase), so there are no
+        // legacy discriminant-less events to rehydrate: the `undefined` branch
+        // here is exclusively the agent case. This projection is display-only
+        // (run.yaml), so folding the prompt away costs nothing.
         steps[event.stepId] = withCommand(
           { stepId: event.stepId, status: 'running' },
           event.stepType === 'script' ? event.command : undefined,
