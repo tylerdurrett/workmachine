@@ -6,9 +6,23 @@ import type {
   ScriptStep,
   WorkflowDefinition,
 } from '../workflow/index.js';
-import { resolveCommand, resolveStep } from './resolver.js';
+import { resolveStep } from './resolver.js';
 
 const runId = '20260607T120000Z-tiny-smoke-ab12';
+
+/**
+ * Resolve a script step's `run` to just its command string. This is the
+ * script-specific convenience the old `resolveCommand` export provided; it now
+ * lives here as a test helper over the real {@link resolveStep} path so the
+ * substitution assertions below stay unchanged without a production export.
+ */
+function resolveCommand(
+  workflow: WorkflowDefinition,
+  step: ScriptStep,
+  events: readonly EngineEvent[],
+): string {
+  return resolveStep(workflow, step, events).command;
+}
 
 /** Build a `run_created` event seeding the log with the run's inputs. */
 function created(inputs: Record<string, unknown> = {}): EngineEvent {
@@ -310,7 +324,7 @@ describe('resolveStep (per-step-kind resolution into the ResolvedStep union)', (
     return step;
   }
 
-  it('resolves a script step into the script variant, command as resolveCommand would', () => {
+  it('resolves a script step into the script variant, substituting its command', () => {
     const workflow = loadWorkflow(`
 slug: tiny-smoke
 inputs:
@@ -329,7 +343,7 @@ steps:
     expect(resolveStep(workflow, step, events)).toEqual({
       type: 'script',
       id: 'greet',
-      command: resolveCommand(workflow, step, events),
+      command: "printf 'hi' > artifacts/out.txt",
       produces: [{ id: 'out', path: 'artifacts/out.txt' }],
     });
   });

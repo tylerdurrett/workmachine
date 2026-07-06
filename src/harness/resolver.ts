@@ -183,26 +183,6 @@ function substitute(
 }
 
 /**
- * Resolve `step.run` into a concrete command by substituting every `{{...}}`
- * token through the shared {@link substitute} path. Pure: no filesystem, clock,
- * or shell — just `(workflow, step, events)`.
- *
- * @param workflow the run's validated workflow definition (its snapshot).
- * @param step the script step whose templated command is being resolved.
- * @param events the run's event log, read for the run's inputs and the latest
- *   request-changes feedback.
- * @returns the fully-resolved command, with no `{{...}}` tokens remaining.
- * @throws if a token references a binding absent from inputs/artifacts.
- */
-export function resolveCommand(
-  workflow: WorkflowDefinition,
-  step: ScriptStep,
-  events: readonly EngineEvent[],
-): string {
-  return substitute(workflow, events, step.id, step.run);
-}
-
-/**
  * Resolve an executable step into its {@link ResolvedStep} variant: a `script`
  * step's `run` becomes the resolved `command`, an `agent` step's `prompt`
  * becomes the resolved prompt (with the optional `model` passed through
