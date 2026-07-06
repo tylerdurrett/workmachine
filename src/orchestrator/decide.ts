@@ -72,10 +72,10 @@ function commandValidatesGate(
  *    never appends `gate_decided`.
  *  - `open_gate <id>` — the first review step (in workflow order) that is
  *    `pending` with its `needs` satisfied, when no gate is currently open.
- *  - `run_step <id>` — the first `script` step (in workflow order) that is
- *    `pending` and whose `needs` are all satisfied. A step left `pending` by a
- *    crash mid-step (dangling dispatch) or a `request_changes` loop is
- *    re-dispatched here.
+ *  - `run_step <id>` — the first executable step of any kind (`script` or
+ *    `agent`, in workflow order) that is `pending` and whose `needs` are all
+ *    satisfied. A step left `pending` by a crash mid-step (dangling dispatch) or
+ *    a `request_changes` loop is re-dispatched here.
  *  - `wait` — nothing is currently runnable but the run is not terminal: a gate
  *    is open with no valid command yet, a step is in flight (`running`), or every
  *    remaining step is blocked on a dependency that has not succeeded.
