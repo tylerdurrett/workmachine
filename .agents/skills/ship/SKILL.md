@@ -3,6 +3,8 @@ name: ship
 description: Tier-aware ship skill. Reads the input spec's `size:*` label and dispatches. `size:task` squash-merges the PR, closes the task, prunes the local feature branch; falls back to a defensive close when no open PR exists. `size:slice` opens a promotion PR onto the feature integration branch (or `main` for orphans), prompts merge-now-or-review, closes the slice, deletes the local slice branch. `size:feature` opens the final promotion PR onto `main`, closes the feature, deletes the local feature branch, ticks the parent initiative's progress comment if any. `size:initiative` refuses (initiatives close manually). Use when the user says "ship task <N>", "ship slice <S>", "ship feature <F>", "land PR <#>", "close out slice <S>", "promote feature <F>", or "close task <N> defensively".
 ---
 
+*Batch-mode agents: read [TASK.md](TASK.md) instead of this file — it is the /batch-facing task-tier subset (T1–T8). Keep the two in sync when editing either.*
+
 # Ship
 
 A single tier-aware ship skill. The user says "ship the thing"; the skill reads the input's `size:*` label and picks the right mechanics. The moment-of-truth (intermediate vs. user-visible production ship) lives in the outcome line, not in the skill's name.
@@ -142,6 +144,8 @@ Closing the sub-issue is enough on the parent side: GitHub's native sub-issue ro
 
 If no closing reference was found in T2, skip the issue-close step entirely and note in the final report that no issue was closed.
 
+Then refresh the parent's DAG (best-effort) — see [Refresh the parent's Sub-issue DAG](#refresh-the-parents-sub-issue-dag-best-effort). The task's parent is its body's `**Part of:** #<P>` line; if absent (orphan task), skip.
+
 ### T6. Delete the local feature branch
 
 ```bash
@@ -236,18 +240,24 @@ The flow is stateful but presents as a single invocation: it detects whether a p
 
 ### P1. Verify all native sub-issues are closed
 
+Partition open children into **blocking** (real scope that must land before promotion) and **deferred** (`cleanup`- or `deferred`-labeled housekeeping — typically findings parked by `/defer` or auto-filed by a `/batch` Settle pass, explicitly future work):
+
 ```bash
 owner_repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-open_children=$(gh api "repos/${owner_repo}/issues/<N>/sub_issues" \
-  --jq '.[] | select(.state == "open") | "#\(.number) — \(.title)"')
+open_blocking=$(gh api "repos/${owner_repo}/issues/<N>/sub_issues" \
+  --jq '.[] | select(.state == "open") | select([.labels[].name] | (index("cleanup") or index("deferred")) | not) | "#\(.number) — \(.title)"')
+open_deferred=$(gh api "repos/${owner_repo}/issues/<N>/sub_issues" \
+  --jq '.[] | select(.state == "open") | select([.labels[].name] | (index("cleanup") or index("deferred"))) | "#\(.number) — \(.title)"')
 ```
 
-If `open_children` is non-empty, stop and tell the user:
+If `open_blocking` is non-empty, stop and tell the user:
 
 > Parent #<N> still has open sub-issues. Close each one via `/ship` (PR-merge or defensive close, picked automatically):
 > <list>
 
 Do not force-close children. The user re-engages explicitly per child.
+
+`open_deferred` does **not** block promotion — deferred work is, by definition, for later. But carry it forward: surface it loudly in the P9 report so it's acknowledged at the gate instead of silently promoted past (this is the anti-burial guarantee — a slice never ships while quietly orphaning the cleanup it spawned). Keep the list for P9.
 
 ### P2. Identify the integration branch and verify clean tree
 
@@ -414,6 +424,8 @@ Then:
 
 3. **Do not delete the remote integration branch.** It stays on origin until a future grace-period sweep.
 
+4. **Refresh the parent's DAG (best-effort)** — see [Refresh the parent's Sub-issue DAG](#refresh-the-parents-sub-issue-dag-best-effort). The parent is this spec's `**Part of:** #<P>` line — the same `gp_num` P8 derives below. For a slice that's the feature; for a feature that's the initiative. If orphan (no `**Part of:**`), skip.
+
 ### P8. Tick the parent's progress comment (best-effort, feature tier)
 
 After the spec issue closes, check whether this spec has a parent with a sticky progress comment to tick. Only initiatives carry `<!-- progress-comment:initiative -->`, so this step only does work at the feature tier; at the slice tier (parent is a feature) the lookup falls through to a silent skip.
@@ -470,12 +482,37 @@ Three-block template. Outcome line carries the moment-of-truth signal:
 
 Links: promotion PR URL, closed spec URL, parent's ticked row when applicable.
 
+If `open_deferred` (from P1) is non-empty, add a **Deferred work carried forward** line listing those issues — the cleanup/findings this spec spawned that are now promoting un-addressed. They didn't block the ship, but the reader should know they're outstanding:
+
+```
+> Deferred work carried forward (not blocking, but now in `<promotion-target>` un-addressed): #<N> <title> · ...
+>   Run `/triage` on each to size and ready it, then `/execute` (or `/batch`) before they rot.
+```
+
 Next step:
 
 - Slice whose parent feature still has open sibling slices -> `Stop.` (the user picks the next slice).
 - Slice whose parent feature has zero open children remaining -> `> Next step: \`/ship #<feature>\`. The feature is now ready to ship to production.`
 - Feature whose parent initiative still has open siblings -> `Stop.` with a note that the initiative remains in flight; close it manually when its Definition of done is met.
 - Orphan slice or feature -> `Stop.`.
+
+## Refresh the parent's Sub-issue DAG (best-effort)
+
+Shared by both flows (task tier in T5, slice/feature tier in P7). When a child closes/merges, the custom Mermaid DAG that `/dag` may have written onto the **parent's** body goes stale — unlike GitHub's native rollup, it does not auto-update. So after the close, recolor it:
+
+```bash
+node "$(git rev-parse --show-toplevel)/.agents/skills/dag/recolor.mjs" <P>
+```
+
+`<P>` is the just-closed spec's parent (derived per the calling step). The script is a **no-op** if the parent has no `## Sub-issue DAG` section, so DAGs stay opt-in per parent — nothing is created where none existed.
+
+Rules, mirroring P8's progress-comment tick:
+
+- **Best-effort, never blocks the ship.** The close already succeeded by the time this runs. On any failure, log loudly and continue to the end-of-run output; a stale chart is not worth undoing a merge.
+- **Conditional / idempotent.** Only an existing chart is touched, and only its node colors; re-running is safe.
+- **Skip for orphans.** No parent → nothing to refresh.
+
+See [the dag skill's recolor section](../dag/SKILL.md#refreshing-colors-only-the-recolormjs-fast-path) for what the script does and why it's safe to run concurrently.
 
 ## What this skill does NOT do
 
