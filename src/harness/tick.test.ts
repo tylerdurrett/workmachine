@@ -15,6 +15,7 @@ import {
 import { loadWorkflow } from '../workflow/index.js';
 import type { WorkflowDefinition } from '../workflow/index.js';
 import { tick } from './tick.js';
+import type { TickDeps } from './tick.js';
 
 /**
  * The harness integration test: it drives the real `tick` loop against a real
@@ -28,6 +29,18 @@ const runId = '20260607T120000Z-tiny-smoke-ab12';
 const now = (): string => '2026-06-07T12:00:00.000Z';
 /** The script-only executor registry most tests tick with. */
 const executors = { script: scriptExecutor };
+
+/**
+ * Invoke `tick` with the deps every case shares — the script executor registry
+ * and the deterministic clock — so each test states only what it varies (its
+ * `workflow`/`log`/`runDir`, plus any `tracker` or cursor). Overrides win, so a
+ * case can swap in an agent-only registry or add a tracker.
+ */
+function callTick(
+  overrides: Pick<TickDeps, 'workflow' | 'log' | 'runDir'> & Partial<TickDeps>,
+): Promise<void> {
+  return tick({ executors, now, ...overrides });
+}
 
 describe('tick (full read→decide→resolve→execute→append loop)', () => {
   let runsRoot: string;
@@ -81,13 +94,7 @@ steps:
 `);
     const { runDir, log } = seedRun(workflow, [created()]);
 
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     expect(events.map((e) => e.type)).toEqual([
@@ -143,13 +150,7 @@ steps:
 `);
     const { runDir, log } = seedRun(workflow, [created({ msg: 'hello run' })]);
 
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     const dispatched = events.find((e) => e.type === 'step_dispatched');
@@ -176,13 +177,7 @@ steps:
 `);
     const { runDir, log } = seedRun(workflow, [created()]);
 
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     expect(events.map((e) => e.type)).toEqual([
@@ -212,22 +207,10 @@ steps:
 `);
     const { runDir, log } = seedRun(workflow, [created()]);
 
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
     const afterFirst = log.read();
 
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
     const afterSecond = log.read();
 
     // The second tick sees `done` immediately and appends nothing.
@@ -299,13 +282,7 @@ steps:
     const workflow = loadWorkflow(GATED_WORKFLOW);
     const { log, runDir } = seedRun(workflow, [created()]);
 
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     // The run dispatches the script step, then opens the gate and waits — no
@@ -329,13 +306,7 @@ steps:
     const { log, runDir } = seedRun(workflow, [created()]);
 
     // First tick: run the step and open the gate.
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
     // A reviewer approves the open gate.
     log.append(
       command(log.read().length, {
@@ -345,13 +316,7 @@ steps:
       }),
     );
     // Second tick: validate the command, decide the gate, finalize.
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     expect(events.map((e) => e.type)).toEqual([
@@ -375,13 +340,7 @@ steps:
     const workflow = loadWorkflow(GATED_WORKFLOW);
     const { log, runDir } = seedRun(workflow, [created()]);
 
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
     log.append(
       command(log.read().length, {
         gateId: 'review',
@@ -389,13 +348,7 @@ steps:
         decision: 'reject',
       }),
     );
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     expect(events.map((e) => e.type)).toEqual([
@@ -418,13 +371,7 @@ steps:
     const workflow = loadWorkflow(GATED_WORKFLOW);
     const { log, runDir } = seedRun(workflow, [created()]);
 
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
     log.append(
       command(log.read().length, {
         gateId: 'review',
@@ -432,23 +379,11 @@ steps:
         decision: 'approve',
       }),
     );
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
     const afterDecision = log.read();
 
     // Re-ticking a finalized gated run sees `done` and appends nothing more.
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
     expect(log.read()).toEqual(afterDecision);
   });
 
@@ -477,13 +412,7 @@ steps:
       },
     ]);
 
-    await tick({
-      workflow,
-      log,
-      executors,
-      runDir,
-      now,
-    });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     // The fold unwound the dangling dispatch to pending, so tick re-dispatched.
@@ -524,14 +453,7 @@ steps:
     it('renders the review card into the run card on gate_opened', async () => {
       const { tracker, cardId, log, runDir } = await seedCardedRun();
 
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-      });
+      await callTick({ workflow, log, runDir, tracker });
 
       const stored = tracker.cardState(cardId);
       // The single review card was rendered once, into the run's existing card.
@@ -547,14 +469,7 @@ steps:
     it('renders into the run-recorded card ref, never minting a new card', async () => {
       const { tracker, cardId, log, runDir } = await seedCardedRun();
 
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-      });
+      await callTick({ workflow, log, runDir, tracker });
 
       // The harness rendered into the card the run recorded on `card_created`
       // (`card-1`), not a freshly minted one — the seam reuses the CardRef.
@@ -567,14 +482,7 @@ steps:
       const { tracker, cardId, log, runDir } = await seedCardedRun();
 
       // First tick: run the work, open the gate, render the card.
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-      });
+      await callTick({ workflow, log, runDir, tracker });
       const renderCountAfterOpen = tracker.cardState(cardId)?.renderCount;
 
       // A reviewer requests changes with feedback. The fold loops the work and
@@ -588,14 +496,7 @@ steps:
           feedback: 'please tighten the copy',
         }),
       );
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-      });
+      await callTick({ workflow, log, runDir, tracker });
 
       const stored = tracker.cardState(cardId);
       // Same card, rendered again (not a new one), now carrying the revision.
@@ -610,14 +511,7 @@ steps:
       const { log, runDir } = seedRun(workflow, [created()]);
       const tracker = new FakeTracker();
 
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-      });
+      await callTick({ workflow, log, runDir, tracker });
 
       // The gate still opened — the projection is a silent no-op without a card.
       expect(log.read().map((e) => e.type)).toContain('gate_opened');
@@ -669,15 +563,7 @@ steps:
       ]);
       const cursor = cursorStore();
       // First tick: run the script step and open the gate (no comments yet).
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
       return { tracker, card, log, runDir, cursor };
     }
 
@@ -687,15 +573,7 @@ steps:
       const { tracker, card, log, runDir, cursor } = await openGatedRun();
       await tracker.seedComment(card, '/approve', 'reviewer');
 
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       const events = log.read();
       expect(events.map((e) => e.type)).toEqual([
@@ -727,15 +605,7 @@ steps:
         'reviewer',
       );
 
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       const events = log.read();
       const received = events.find((e) => e.type === 'command_received');
@@ -757,15 +627,7 @@ steps:
       const { tracker, card, log, runDir, cursor } = await openGatedRun();
       await tracker.seedComment(card, '/reject not shippable', 'reviewer');
 
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       const events = log.read();
       expect(events.at(-1)?.type).toBe('run_failed');
@@ -781,15 +643,7 @@ steps:
       await tracker.seedComment(card, '/approve', 'reviewer');
 
       // First poll ingests the comment and advances the cursor.
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
       const afterFirst = log.read();
       expect(
         afterFirst.filter((e) => e.type === 'command_received'),
@@ -799,15 +653,7 @@ steps:
       // re-reads the comment from the beginning, but dedup off the log keeps it
       // from being ingested a second time (ADR-0006).
       cursor.lose();
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       const received = log.read().filter((e) => e.type === 'command_received');
       expect(received).toHaveLength(1);
@@ -822,27 +668,11 @@ steps:
       await tracker.seedComment(card, '/approve', 'reviewer');
 
       // First approve closes the gate and completes the run.
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       // A later reviewer leaves a second valid command on the now-closed gate.
       await tracker.seedComment(card, '/reject too late', 'reviewer');
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       const events = log.read();
       // The second command is still recorded as an audit fact (two
@@ -873,15 +703,7 @@ steps:
       expect(isBotComment(botComment.body)).toBe(true);
       expect(botComment.author).not.toBe('workmachine');
 
-      await tick({
-        workflow,
-        log,
-        executors,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       const events = log.read();
       // No command was ingested from the bot's own comment, and the gate stays
@@ -922,12 +744,11 @@ steps:
       ]);
       const agent = fakeAgentExecutor();
 
-      await tick({
+      await callTick({
         workflow,
         log,
-        executors: { agent: agent.executor },
         runDir,
-        now,
+        executors: { agent: agent.executor },
       });
 
       const events = log.read();
@@ -983,12 +804,11 @@ steps:
       const { runDir, log } = seedRun(workflow, [created()]);
       const agent = fakeAgentExecutor();
 
-      await tick({
+      await callTick({
         workflow,
         log,
-        executors: { agent: agent.executor },
         runDir,
-        now,
+        executors: { agent: agent.executor },
       });
 
       const dispatched = log.read()[1];
@@ -1017,12 +837,11 @@ steps:
       const { runDir, log } = seedRun(workflow, [created()]);
       const agent = fakeAgentExecutor();
 
-      await tick({
+      await callTick({
         workflow,
         log,
-        executors: { agent: agent.executor },
         runDir,
-        now,
+        executors: { agent: agent.executor },
       });
 
       const dispatched = log.read()[1];
@@ -1056,13 +875,7 @@ steps:
           }),
       };
 
-      await tick({
-        workflow,
-        log,
-        executors: { agent: executor },
-        runDir,
-        now,
-      });
+      await callTick({ workflow, log, runDir, executors: { agent: executor } });
 
       const succeeded = log.read().find((e) => e.type === 'step_succeeded');
       expect(succeeded?.type).toBe('step_succeeded');
@@ -1089,13 +902,7 @@ steps:
           }),
       };
 
-      await tick({
-        workflow,
-        log,
-        executors: { agent: executor },
-        runDir,
-        now,
-      });
+      await callTick({ workflow, log, runDir, executors: { agent: executor } });
 
       const failed = log.read().find((e) => e.type === 'step_failed');
       expect(failed?.type).toBe('step_failed');
@@ -1118,7 +925,7 @@ steps:
 `);
       const { runDir, log } = seedRun(workflow, [created()]);
 
-      await tick({ workflow, log, executors, runDir, now });
+      await callTick({ workflow, log, runDir });
 
       const succeeded = log.read().find((e) => e.type === 'step_succeeded');
       expect(succeeded?.type).toBe('step_succeeded');
@@ -1139,15 +946,9 @@ steps:
       const { runDir, log } = seedRun(workflow, [created()]);
 
       // Only the script executor is registered; the agent step has no executor.
-      await expect(
-        tick({
-          workflow,
-          log,
-          executors,
-          runDir,
-          now,
-        }),
-      ).rejects.toThrow(/no executor registered for step type 'agent'/);
+      await expect(callTick({ workflow, log, runDir })).rejects.toThrow(
+        /no executor registered for step type 'agent'/,
+      );
 
       // The lookup failed BEFORE the append, so no dangling dispatch was left.
       expect(log.read().some((e) => e.type === 'step_dispatched')).toBe(false);
