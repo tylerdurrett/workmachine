@@ -94,11 +94,13 @@ The full skill set, organized by phase of the loop.
 | `/check`     | Single-agent sanity check on a decomposition. Tier-aware: initiative input runs Outcome / Definition-of-done coverage; feature input runs user-story coverage; slice input runs AC coverage + codebase grounding + per-task sizing + sequencing; task input runs codebase grounding + AC sanity-check, with lightweight sibling-context checks when the task has a parent. Read-only, fast, conversational. |
 | `/audit`     | Multi-agent (Claude + Codex) version of `/check`. Synthesizes findings with provenance, gates on user approval, writes back additive body edits + a synthesis comment. Reach for it when the cost of a flawed decomposition is high. |
 
-### Execute (once per task)
+### Execute (once per task, or once per slice via the batch orchestrators)
 
 | Skill            | What it does                                                                                                |
 | ---------------- | ----------------------------------------------------------------------------------------------------------- |
 | `/execute`       | Implements a `size:task` end-to-end on a branch off the parent's integration branch. One commit per cohesive sub-section. Opens a PR with `Closes #<N>`. |
+| `/batch`         | Batch-executes the ready `size:task` children of one parent slice via a worktree-isolated workflow. Infers a dependency DAG, runs independent tasks in parallel and dependent ones in order, squash-merges every code-review-clean task into the slice branch, then opens one slice promotion PR for review. |
+| `/autopilot`     | Takes an already-triaged `size:slice` from decomposition to a batched slice promotion PR, autonomously. Composes `/decompose`, `/audit` (auto-approving routine findings, halting on blocking ones), and `/triage` across the task children, then `/batch`, plus a final sweep of the deferred cleanup findings onto the same slice PR. |
 
 ### Ship (one tier-aware skill)
 
@@ -114,7 +116,7 @@ The user-visible-vs-intermediate signal lives in the outcome line of the end-of-
 | ------------- | ------------------------------------------------------------------------------------------------------------ |
 | `/status`     | Read-only survey of where work stands. Walks the tracker, picks one recommended next-step skill. The "where am I" answer. |
 | `/defer`      | Captures cleanup / dedup / refactor findings as `cleanup`-labeled issues so they don't pollute the current PR. Companion to `/simplify`. |
-| `/how-to-use` | Verbatim user manual. Same content every invocation. Static reference.                                       |
+| `/dag`        | Writes (or refreshes) a Mermaid dependency DAG of an issue's direct sub-issues into the issue body. Tier-agnostic. Color-codes each node by status (done / in progress / not started). Idempotent. |
 
 ## The labels
 
@@ -145,7 +147,7 @@ The recursion is captured in [ADR-0001](../adr/0001-issues-branch-from-parent-in
 
 ## End-of-run output
 
-Every workflow skill that produces a durable artifact ends with the same three-block template (outcome, links, next step). Skills whose output IS the report (`/status`, `/how-to-use`, `/triage` in conversational mode, `/grill-with-docs`, `/check`, `/audit`) are explicit exceptions. Full detail in [output-format.md](output-format.md).
+Every workflow skill that produces a durable artifact ends with the same three-block template (outcome, links, next step). Skills whose output IS the report (`/status`, `/triage` in conversational mode, `/grill-with-docs`, `/check`, `/audit`) are explicit exceptions. Full detail in [output-format.md](output-format.md).
 
 ## Where to start
 
@@ -153,7 +155,6 @@ Every workflow skill that produces a durable artifact ends with the same three-b
 - **You have an alignment session ready to capture**: run `/to-spec`.
 - **You have a freshly captured spec on the tracker**: run `/triage <N>` to verify size, seed bookkeeping, and route it.
 - **You're not sure where you are**: run `/status`.
-- **You want this overview inline**: run `/how-to-use`.
 
 ## What sits above the loop
 
