@@ -83,9 +83,9 @@ Optional labels that describe what kind of work a spec represents, orthogonal to
 | ------------- | --------------------------------------------------------------------------------------------- |
 | `bug`         | Something is broken. Typically applied to `size:task` and `size:slice` specs.                 |
 | `enhancement` | New feature or improvement. Typically applied at any size.                                    |
-| `cleanup`     | Refactor / dedup / housekeeping work surfaced during other tasks. Created by `/defer`. |
+| `cleanup`     | Refactor / dedup / housekeeping work surfaced during other tasks. Created by `/defer` or `/batch`'s auto-defer stage. |
 
-`cleanup` specs enter triage like any other (`needs-triage` first), but signal to the triager that the work is non-urgent housekeeping rather than user-facing change. `/triage cleanup` is a useful periodic sweep to keep the queue from rotting.
+`cleanup` specs arrive in one of two states. The default is `cleanup` + `needs-triage`: they enter triage like any other spec, the label just signals non-urgent housekeeping rather than user-facing change. The exception is `/batch`'s auto-defer stage (`.agents/skills/batch/workflow.js`), which has already verified every finding against the merged code and files genuinely task-sized bundles pre-triaged as `cleanup` + `size:task` + `ready-for-agent` — skipping `needs-triage` and going straight to batchable. `/triage cleanup` is a useful periodic sweep to keep the default-path queue from rotting.
 
 ## Label inventory
 
