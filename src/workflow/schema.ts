@@ -173,6 +173,19 @@ export function isGateStep(step: WorkflowStep): step is GateStep {
   return step.type === 'gate';
 }
 
+/**
+ * Narrow a {@link WorkflowStep} to a produces-bearing / templated step — a
+ * `script` or `agent` step. These are the kinds that carry interpolatable text
+ * and may `produce` artifacts; gate steps carry neither. Passes that reason over
+ * commands/prompts and artifact wiring (interpolation, DAG, resolver) narrow on
+ * this rather than hand-rolling the `script || agent` disjunction.
+ */
+export function isTemplatedStep(
+  step: WorkflowStep,
+): step is ScriptStep | AgentStep {
+  return isScriptStep(step) || isAgentStep(step);
+}
+
 /** A fully-parsed, validated workflow definition. */
 export type WorkflowDefinition = z.infer<typeof workflowSchema>;
 /** A single validated step within a {@link WorkflowDefinition} (script, agent, or gate). */

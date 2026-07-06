@@ -13,8 +13,7 @@ import {
   ARTIFACT_REF_RE,
   FEEDBACK_REF_RE,
   INPUT_REF_RE,
-  isAgentStep,
-  isScriptStep,
+  isTemplatedStep,
   TOKEN_RE,
 } from '../workflow/index.js';
 
@@ -101,7 +100,7 @@ function readFeedback(events: readonly EngineEvent[]): string {
 function artifactPaths(workflow: WorkflowDefinition): Map<string, string> {
   return new Map(
     workflow.steps.flatMap((step) =>
-      isScriptStep(step) || isAgentStep(step)
+      isTemplatedStep(step)
         ? step.produces.map((a): [string, string] => [a.id, a.path])
         : [],
     ),
