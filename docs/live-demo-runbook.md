@@ -180,6 +180,26 @@ Confirm:
 
 Teardown is the same as below.
 
+### Observed proof package (2026-07-06, task #76)
+
+The request-changes path above was performed human-watched against
+`tylerdurrett/workmachine-sandbox` issue #3 — run
+`20260706T190657Z-tiny-agent-xhbw`, topic "autumn rain", real
+subscription-authenticated `codex exec`:
+
+- First dispatch: codex wrote a genuine haiku; `step_succeeded` (seq 3) recorded
+  `artifacts/haiku.txt` at sha256 `6436b47f…` (71 bytes), with the final message
+  captured as `summary` and rendered as the rollup continuation line on the card.
+- Reviewer commented `/request-changes make it about a cat.`; the next tick
+  logged `command_received` → `gate_decided (request_changes)` →
+  `step_dispatched` → `step_succeeded` → `gate_opened` (seq 5–9), the recorded
+  prompt carrying the note verbatim after the `…if present: ` marker.
+- The artifact was genuinely revised ("Cat blinks beneath wet gold leaves…") —
+  sha256 `da573145…`, 79 bytes — and the SAME issue re-rendered with the new
+  hash; no second card was minted.
+- `/approve` then closed the log `command_received` → `gate_decided (approve)` →
+  `run_completed` (seq 10–12), and `run.yaml` read `status: completed`.
+
 ## Teardown
 
 ```sh
