@@ -992,6 +992,20 @@ exit 0
 `;
 
 /**
+ * Restore `process.env.PATH` to a previously-captured value. When the original
+ * was unset, `delete` it rather than assigning — a bare `process.env.PATH =
+ * undefined` would coerce to the literal string `'undefined'` and poison PATH
+ * for later tests.
+ */
+function restorePath(original: string | undefined): void {
+  if (original === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = original;
+  }
+}
+
+/**
  * The agent-step smoke (issue #62): the agent-twin of the gated block above. It
  * drives the *real* CLI against the committed `workflows/tiny-agent/` package
  * through the whole gated loop — `create -> tick` (the agent step runs, the
@@ -1037,7 +1051,7 @@ describe('integration smoke: agent loop with stub codex (create -> tick -> appro
   });
 
   afterEach(async () => {
-    process.env.PATH = originalPath;
+    restorePath(originalPath);
     delete process.env.WORKMACHINE_SANDBOX_REPO;
     await rm(stubDir, { recursive: true, force: true });
     await rm(runsRoot, { recursive: true, force: true });
@@ -1206,7 +1220,7 @@ describe('integration smoke: agent revision loop with stub codex (request_change
   });
 
   afterEach(async () => {
-    process.env.PATH = originalPath;
+    restorePath(originalPath);
     delete process.env.WORKMACHINE_SANDBOX_REPO;
     await rm(stubDir, { recursive: true, force: true });
     await rm(runsRoot, { recursive: true, force: true });
