@@ -9,11 +9,33 @@ This package is the agent-twin of [tiny-smoke-gated](../tiny-smoke-gated/): one
 `agent` step (`haiku`) whose prompt interpolates `{{inputs.topic}}` and produces
 a single artifact, `artifacts/haiku.txt`, followed by a `gate` (review) step
 (`review`) that `needs` it and accepts `approve`, `request_changes`, or
-`reject`. It is the fixture the agent integration smoke
+`reject`. Like [tiny-smoke-feedback](../tiny-smoke-feedback/), the step's prompt
+also interpolates `{{feedback.note}}`, so the resolved prompt — and therefore
+the artifact the re-run produces — differs once a reviewer has requested
+changes. It is the fixture the agent integration smoke
 (`src/integration.smoke.test.ts`) drives the real agent loop against:
 `run create -> tick` (which dispatches `codex exec` and stops at
 `gate_opened`), then `command approve` followed by another `tick` to
 `run_completed`.
+
+## The request-changes revision path
+
+Because the prompt threads `{{feedback.note}}`, the same review card loops
+through a revision round without minting a new one (one card per gate,
+[ADR-0004](../../docs/adr/0004-tracker-projection-organized-around-gates.md)):
+
+1. `run create -> tick` dispatches the agent (feedback resolves to empty, so the
+   prompt ends with the bare "…if present: " marker) and stops at `gate_opened`.
+2. `command request_changes <note>` records the reviewer's note.
+3. `tick` re-opens the **same** gate and re-dispatches the agent with
+   `{{feedback.note}}` resolved to the note — recorded verbatim on the
+   re-dispatch's `step_dispatched.prompt` — so the agent genuinely revises the
+   haiku, and its bytes/sha256 change from the first round.
+4. `command approve` then `tick` advances past the gate to `run_completed`.
+
+On the first dispatch the resolver substitutes `{{feedback.note}}` to an empty
+string (no prior `gate_decided(request_changes)`), so the same templated prompt
+is dispatchable both before and after a revision round without throwing.
 
 An agent step's resolved prompt is composed at dispatch: the engine appends a
 deterministic `## Engine contract` block naming every declared artifact path
@@ -37,6 +59,8 @@ pnpm build
 node dist/cli/main.js run create workflows/tiny-agent/workflow.yaml \
   --input topic=autumn
 node dist/cli/main.js tick <run-id>          # codex writes the haiku, stops at the gate
+node dist/cli/main.js command <run-id> request_changes "make it about maple leaves"
+node dist/cli/main.js tick <run-id>          # codex revises the haiku with the note, stops at the gate
 node dist/cli/main.js command <run-id> approve
 node dist/cli/main.js tick <run-id>          # advances past the gate to completed
 ```

@@ -199,6 +199,57 @@ describe('domain type contracts', () => {
     expect(artifact.size).toBe(12);
     expect(artifact.sha256).toHaveLength(64);
   });
+
+  it('carries an optional agent summary on step_succeeded, absent for scripts', () => {
+    const scriptSucceeded: EngineEvent = {
+      type: 'step_succeeded',
+      runId,
+      seq: 3,
+      ts: '2026-06-07T12:00:02.000Z',
+      stepId: 'greet',
+      artifacts: [artifact],
+    };
+    const agentSucceeded: EngineEvent = {
+      type: 'step_succeeded',
+      runId,
+      seq: 3,
+      ts: '2026-06-07T12:00:02.000Z',
+      stepId: 'draft',
+      artifacts: [artifact],
+      summary: 'Wrote the draft.',
+    };
+
+    // A script step's event omits the field entirely (not set to undefined).
+    expect('summary' in scriptSucceeded).toBe(false);
+    if (agentSucceeded.type === 'step_succeeded') {
+      expect(agentSucceeded.summary).toBe('Wrote the draft.');
+    }
+  });
+
+  it('carries an optional agent summary on step_failed, absent for scripts', () => {
+    const scriptFailed: EngineEvent = {
+      type: 'step_failed',
+      runId,
+      seq: 4,
+      ts: '2026-06-07T12:00:03.000Z',
+      stepId: 'greet',
+      reason: 'exit code 1',
+    };
+    const agentFailed: EngineEvent = {
+      type: 'step_failed',
+      runId,
+      seq: 4,
+      ts: '2026-06-07T12:00:03.000Z',
+      stepId: 'draft',
+      reason: 'codex exited with code 3',
+      summary: 'Got stuck on the second stanza.',
+    };
+
+    expect('summary' in scriptFailed).toBe(false);
+    if (agentFailed.type === 'step_failed') {
+      expect(agentFailed.summary).toBe('Got stuck on the second stanza.');
+    }
+  });
 });
 
 describe('foldRunState card_created handling', () => {
@@ -241,5 +292,113 @@ describe('foldRunState card_created handling', () => {
     });
     // The fold records the card but touches no step: greet stays pending.
     expect(state.steps.greet?.status).toBe('pending');
+  });
+});
+
+describe('foldRunState agent summary handling', () => {
+  const workflow: WorkflowDefinition = {
+    slug: 'tiny-agent',
+    inputs: {},
+    steps: [
+      {
+        id: 'draft',
+        type: 'agent',
+        prompt: 'Write a draft',
+        needs: [],
+        produces: [],
+      },
+    ],
+  };
+
+  function created(): EngineEvent {
+    return {
+      type: 'run_created',
+      runId,
+      seq: 0,
+      ts: '2026-06-07T12:00:00.000Z',
+      workflowSlug: 'tiny-agent',
+      inputs: {},
+    };
+  }
+
+  it('carries the summary onto StepState from step_succeeded', () => {
+    const state = foldRunState(workflow, [
+      created(),
+      {
+        type: 'step_dispatched',
+        runId,
+        seq: 1,
+        ts: '2026-06-07T12:00:01.000Z',
+        stepId: 'draft',
+        stepType: 'agent',
+        prompt: 'Write a draft',
+      },
+      {
+        type: 'step_succeeded',
+        runId,
+        seq: 2,
+        ts: '2026-06-07T12:00:02.000Z',
+        stepId: 'draft',
+        artifacts: [],
+        summary: 'Wrote the draft.',
+      },
+    ]);
+
+    expect(state.steps.draft?.status).toBe('succeeded');
+    expect(state.steps.draft?.summary).toBe('Wrote the draft.');
+  });
+
+  it('carries the summary onto StepState from step_failed', () => {
+    const state = foldRunState(workflow, [
+      created(),
+      {
+        type: 'step_dispatched',
+        runId,
+        seq: 1,
+        ts: '2026-06-07T12:00:01.000Z',
+        stepId: 'draft',
+        stepType: 'agent',
+        prompt: 'Write a draft',
+      },
+      {
+        type: 'step_failed',
+        runId,
+        seq: 2,
+        ts: '2026-06-07T12:00:02.000Z',
+        stepId: 'draft',
+        reason: 'codex exited with code 3',
+        summary: 'Got stuck.',
+      },
+    ]);
+
+    expect(state.steps.draft?.status).toBe('failed');
+    expect(state.steps.draft?.summary).toBe('Got stuck.');
+  });
+
+  it('omits summary from StepState when the terminal event bore none', () => {
+    const state = foldRunState(workflow, [
+      created(),
+      {
+        type: 'step_dispatched',
+        runId,
+        seq: 1,
+        ts: '2026-06-07T12:00:01.000Z',
+        stepId: 'draft',
+        stepType: 'agent',
+        prompt: 'Write a draft',
+      },
+      {
+        type: 'step_succeeded',
+        runId,
+        seq: 2,
+        ts: '2026-06-07T12:00:02.000Z',
+        stepId: 'draft',
+        artifacts: [],
+      },
+    ]);
+
+    const draft = state.steps.draft;
+    expect(draft && 'summary' in draft).toBe(false);
+    expect(draft && 'sessionRef' in draft).toBe(false);
   });
 });

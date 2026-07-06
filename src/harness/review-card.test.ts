@@ -68,6 +68,79 @@ describe('renderReviewCardBody', () => {
     expect(body).not.toContain('`review` — awaiting_review');
   });
 
+  it('renders a succeeded agent step summary beside its status line', () => {
+    const state = awaitingReview({
+      steps: {
+        build: {
+          stepId: 'build',
+          status: 'succeeded',
+          summary: 'wrote the greeting file as requested',
+        },
+        review: { stepId: 'review', status: 'awaiting_review' },
+      },
+    });
+
+    const body = renderReviewCardBody(workflow, state);
+
+    expect(body).toContain('`build` — succeeded');
+    expect(body).toContain('wrote the greeting file as requested');
+  });
+
+  it('renders a failed agent step summary beside its status line', () => {
+    const state = awaitingReview({
+      steps: {
+        build: {
+          stepId: 'build',
+          status: 'failed',
+          summary: 'could not resolve the template variable',
+        },
+        review: { stepId: 'review', status: 'awaiting_review' },
+      },
+    });
+
+    const body = renderReviewCardBody(workflow, state);
+
+    expect(body).toContain('`build` — failed');
+    expect(body).toContain('could not resolve the template variable');
+  });
+
+  it('indents every line of a multi-line summary inside the nested list item', () => {
+    const state = awaitingReview({
+      steps: {
+        build: {
+          stepId: 'build',
+          status: 'succeeded',
+          summary:
+            'greeting file written\nhi now rests in out.txt\ntwo bytes, no more',
+        },
+        review: { stepId: 'review', status: 'awaiting_review' },
+      },
+    });
+
+    const body = renderReviewCardBody(workflow, state);
+
+    // Continuation lines carry four leading spaces (the content column of
+    // `  - `), so the whole summary stays within the nested list item.
+    expect(body).toContain(
+      [
+        '- `build` — succeeded',
+        '  - greeting file written',
+        '    hi now rests in out.txt',
+        '    two bytes, no more',
+      ].join('\n'),
+    );
+  });
+
+  it('keeps the plain status line for a step that carries no summary', () => {
+    // Script steps — and agent steps that captured no final message — leave
+    // `summary` omitted, so the rollup shows only the single-line status.
+    const body = renderReviewCardBody(workflow, awaitingReview());
+
+    expect(body).toContain('`build` — succeeded');
+    // No indented summary continuation is emitted for a summary-less step.
+    expect(body).not.toContain('\n  - ');
+  });
+
   it('surfaces produced artifacts inline with path + sha256 + size', () => {
     const body = renderReviewCardBody(workflow, awaitingReview());
 

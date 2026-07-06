@@ -211,14 +211,30 @@ export async function tick(deps: TickDeps): Promise<void> {
 
       const result = await executor.run(resolved, { runDir });
 
+      // Thread the executor's agent metadata (ADR-0009) onto the terminal event
+      // only when it returned some: a script executor returns neither, so its
+      // event shape is byte-unchanged. `sessionRef` is plumbed but no executor
+      // sources it yet, so in practice only `summary` ever appears.
       if (result.ok) {
         append({
           type: 'step_succeeded',
           stepId: step.id,
           artifacts: result.artifacts,
+          ...(result.summary !== undefined && { summary: result.summary }),
+          ...(result.sessionRef !== undefined && {
+            sessionRef: result.sessionRef,
+          }),
         });
       } else {
-        append({ type: 'step_failed', stepId: step.id, reason: result.error });
+        append({
+          type: 'step_failed',
+          stepId: step.id,
+          reason: result.error,
+          ...(result.summary !== undefined && { summary: result.summary }),
+          ...(result.sessionRef !== undefined && {
+            sessionRef: result.sessionRef,
+          }),
+        });
       }
       continue;
     }

@@ -116,6 +116,43 @@ describe('foldRun', () => {
     expect(foldRun(completedLog)).toEqual(foldRun(completedLog));
   });
 
+  it('carries an agent summary onto the step from step_succeeded', () => {
+    const agentLog: EngineEvent[] = [
+      completedLog[0]!,
+      {
+        type: 'step_dispatched',
+        runId,
+        seq: 1,
+        ts: '2026-06-07T12:00:01.000Z',
+        stepId: 'draft',
+        stepType: 'agent',
+        prompt: 'Write a draft',
+      },
+      {
+        type: 'step_succeeded',
+        runId,
+        seq: 2,
+        ts: '2026-06-07T12:00:02.000Z',
+        stepId: 'draft',
+        artifacts: [],
+        summary: 'Wrote the draft.',
+      },
+    ];
+
+    const state = foldRun(agentLog);
+
+    expect(state.steps.draft?.status).toBe('succeeded');
+    expect(state.steps.draft?.summary).toBe('Wrote the draft.');
+  });
+
+  it('leaves a script step free of agent metadata keys', () => {
+    // The completed gateless log is a script step: its projected StepState must
+    // stay byte-unchanged — no summary/sessionRef keys.
+    const greet = foldRun(completedLog).steps.greet;
+    expect(greet && 'summary' in greet).toBe(false);
+    expect(greet && 'sessionRef' in greet).toBe(false);
+  });
+
   it('throws when the log does not begin with run_created', () => {
     expect(() => foldRun([completedLog[1]!])).toThrow(/run_created/);
     expect(() => foldRun([])).toThrow(/run_created/);
