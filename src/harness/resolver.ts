@@ -97,6 +97,9 @@ function readFeedback(events: readonly EngineEvent[]): string {
  * (script and agent steps alike — the loader admits artifact refs against
  * both, so the resolver must see the same declared set or the two drift).
  * Declared paths are static workflow data, so the map is the same on every tick.
+ * The loader now ENFORCES this by rejecting any `{{...}}` token in a
+ * `produces[].path` (#71), so the map never contains an unresolved token — the
+ * value stored here is always the verbatim path the executor writes and reads.
  */
 function artifactPaths(workflow: WorkflowDefinition): Map<string, string> {
   return new Map(
