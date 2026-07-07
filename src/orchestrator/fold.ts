@@ -6,6 +6,7 @@ import type {
 } from '../domain/index.js';
 import {
   guardedWorkSteps,
+  isTemplatedStep,
   type WorkflowDefinition,
 } from '../workflow/index.js';
 
@@ -22,11 +23,24 @@ import {
  *
  *   step_dispatched → running → step_succeeded (succeeded) | step_failed (failed)
  *
+ * A `step_failed` is reinterpreted against the step's `retries` budget (#89),
+ * counted purely from the log: the fold tallies `step_failed` events per step as
+ * it replays. While attempts remain (failures ≤ `retries`) the failed step folds
+ * back to a fresh `pending` — dispatchable, with no stale command/reason — so
+ * `decide` re-dispatches it (no backoff, no scheduling, no failure-feedback
+ * threading: the resolved command is identical across attempts). Only once the
+ * budget is exhausted (failures > `retries`, i.e. the `retries + 1`th failure)
+ * does the step stay `failed`, carrying its `reason`; harness `finalize` then
+ * appends the terminal `run_failed` as before. A default `retries: 0` therefore
+ * preserves the original behavior exactly — the first failure is terminal.
+ *
  * A **dangling** `step_dispatched` with no terminal `step_succeeded`/`step_failed`
  * folds back to `pending`, not `running`: a crash mid-step leaves a dispatch with
  * no outcome in the log, and on replay that step must be re-runnable. The fold
  * therefore treats "dispatched, no terminal event" as "not yet attempted" so a
- * later `tick` re-dispatches it (AC: crash-mid-step replay).
+ * later `tick` re-dispatches it (AC: crash-mid-step replay). Combined with retry
+ * fold-back, a crash mid-attempt after a prior `step_failed` re-dispatches the
+ * same step deterministically.
  *
  * A `gate` (review) step runs no command; its lifecycle is driven by gate facts:
  *
@@ -50,6 +64,17 @@ import {
 /** Seed a {@link StepState} in its pre-dispatch resting state. */
 function pendingStep(stepId: string): StepState {
   return { stepId, status: 'pending' };
+}
+
+/**
+ * The retry budget declared for a dispatchable step, defaulting to 0. Only
+ * `script`/`agent` steps carry `retries`; a gate step (or an unknown id) yields
+ * 0. Read defensively so a step_failed for a non-dispatchable/unknown id folds
+ * to `failed` on the first failure, exactly as before.
+ */
+function retryBudget(workflow: WorkflowDefinition, stepId: string): number {
+  const step = workflow.steps.find((s) => s.id === stepId);
+  return step !== undefined && isTemplatedStep(step) ? step.retries : 0;
 }
 
 /**
@@ -94,6 +119,11 @@ export function foldRunState(
   // Track step ids dispatched but not yet terminated, so a dangling dispatch
   // (no terminal event) can be unwound to `pending` at the end.
   const danglingDispatch = new Set<string>();
+
+  // Count `step_failed` events per step id as we replay, so each failure can be
+  // weighed against the step's `retries` budget (#89). Purely event-derived —
+  // no I/O — honoring the ADR-0003 determinism boundary.
+  const stepFailureCounts = new Map<string, number>();
 
   for (const event of events) {
     switch (event.type) {
@@ -150,6 +180,19 @@ export function foldRunState(
       }
       case 'step_failed': {
         danglingDispatch.delete(event.stepId);
+        const failures = (stepFailureCounts.get(event.stepId) ?? 0) + 1;
+        stepFailureCounts.set(event.stepId, failures);
+        if (failures <= retryBudget(workflow, event.stepId)) {
+          // Attempts remain: fold back to a fresh `pending` (no stale
+          // command/reason) so `decide` re-dispatches the same step. No
+          // backoff, no feedback threading — the next attempt resolves an
+          // identical command (#89, AC: fail-then-succeed / exhaustion).
+          steps[event.stepId] = pendingStep(event.stepId);
+          break;
+        }
+        // Budget exhausted (failures > retries): the step stays `failed`,
+        // carrying its reason; harness `finalize` appends the terminal
+        // `run_failed` for it, unchanged.
         steps[event.stepId] = withCommand(
           {
             stepId: event.stepId,
