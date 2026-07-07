@@ -85,12 +85,19 @@ export const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 export const LAST_MESSAGE_FILE = '.codex-last-message.txt';
 
 /**
- * The slice of a spawned child the agent executor needs: kill, and the `error`
- * / `close` lifecycle events. `node:child_process`'s `ChildProcess` satisfies
- * it structurally; tests substitute a fake.
+ * The slice of a spawned child the agent executor needs: its process id (to
+ * signal the whole process group on timeout), kill, and the `error` / `close`
+ * lifecycle events. `node:child_process`'s `ChildProcess` satisfies it
+ * structurally; tests substitute a fake.
  */
 export interface AgentChild {
-  /** Deliver a signal to the child (used by the timeout kill). */
+  /**
+   * The child's OS process id, or `undefined` before it has been assigned. Also
+   * the id of the child's process group (it is spawned `detached`, so it leads
+   * its own group), which the timeout kill signals via a negative pid.
+   */
+  pid?: number | undefined;
+  /** Deliver a signal to the child alone (the fallback when `pid` is absent). */
   kill(signal: NodeJS.Signals): boolean;
   /** The child failed to spawn. */
   on(event: 'error', listener: (err: Error) => void): unknown;
@@ -103,13 +110,23 @@ export interface AgentChild {
 
 /**
  * Spawn-function seam: unit tests inject a fake so they never touch a real
- * `codex` binary; production defaults to `node:child_process`'s `spawn`.
+ * `codex` binary; production defaults to `node:child_process`'s `spawn`. The
+ * child is spawned `detached` so it leads its own process group, letting the
+ * timeout kill reap codex's own subprocesses (sandbox helpers, tool calls)
+ * instead of orphaning them.
  */
 export type AgentSpawn = (
   command: string,
   args: readonly string[],
-  options: { stdio: 'ignore' },
+  options: { stdio: 'ignore'; detached: boolean },
 ) => AgentChild;
+
+/**
+ * Deliver a signal to a whole process group (a negative pid). Production uses
+ * `process.kill`; tests inject a fake to assert the group-kill without a real
+ * process group.
+ */
+export type KillGroup = (pid: number, signal: NodeJS.Signals) => void;
 
 /** Injection points for {@link createAgentExecutor}; tests only. */
 export interface AgentExecutorOptions {
@@ -117,6 +134,8 @@ export interface AgentExecutorOptions {
   spawnFn?: AgentSpawn;
   /** Timeout override; the production default is {@link AGENT_TIMEOUT_MS}. */
   timeoutMs?: number;
+  /** Group-kill substitute; defaults to `process.kill`. */
+  killGroupFn?: KillGroup;
 }
 
 /**
@@ -134,8 +153,12 @@ export interface AgentExecutorOptions {
 export function createAgentExecutor(
   options: AgentExecutorOptions = {},
 ): Executor {
-  const spawnFn = options.spawnFn ?? spawn;
+  const spawnFn =
+    options.spawnFn ??
+    ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
   const timeoutMs = options.timeoutMs ?? AGENT_TIMEOUT_MS;
+  const killGroupFn =
+    options.killGroupFn ?? ((pid, signal) => void process.kill(pid, signal));
 
   return {
     async run(step: ResolvedStep, ctx: RunContext): Promise<ExecutorResult> {
@@ -154,6 +177,7 @@ export function createAgentExecutor(
 
       const exit = await runCodex(
         spawnFn,
+        killGroupFn,
         step,
         ctx.runDir,
         lastMessageFile,
@@ -193,12 +217,15 @@ type CodexResult = { ok: true } | { ok: false; error: string };
  * only when the step sets one, and the already-composed prompt as the final
  * argument — exactly the bytes recorded on `step_dispatched`.
  *
- * A wall-clock timer kills a hung child with SIGKILL; the kill surfaces as a
- * timeout failure, not a bare signal exit. Never rejects: a spawn error, a
- * signal, a non-zero exit, and a timeout all resolve as `{ ok: false }` values.
+ * A wall-clock timer SIGKILLs a hung child's whole process group (the child is
+ * spawned `detached`, so it leads its own group and its `-pid` reaches codex's
+ * subprocesses too); the kill surfaces as a timeout failure, not a bare signal
+ * exit. Never rejects: a spawn error, a signal, a non-zero exit, and a timeout
+ * all resolve as `{ ok: false }` values.
  */
 function runCodex(
   spawnFn: AgentSpawn,
+  killGroupFn: KillGroup,
   step: ResolvedAgentStep,
   runDir: string,
   lastMessageFile: string,
@@ -219,12 +246,21 @@ function runCodex(
   ];
 
   return new Promise((resolvePromise) => {
-    const child = spawnFn('codex', args, { stdio: 'ignore' });
+    const child = spawnFn('codex', args, { stdio: 'ignore', detached: true });
 
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      // Reap the whole process group, not just the direct child: codex spawns
+      // its own subprocesses, which orphan if only `child.kill` runs. A negative
+      // pid signals the group (child is the detached group leader). Fall back to
+      // a direct kill only if the pid never landed.
+      const { pid } = child;
+      if (pid === undefined) {
+        child.kill('SIGKILL');
+      } else {
+        killGroupFn(-pid, 'SIGKILL');
+      }
     }, timeoutMs);
 
     child.on('error', (err) => {

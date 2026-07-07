@@ -8,6 +8,7 @@ import {
   type AgentSpawn,
   composeAgentPrompt,
   createAgentExecutor,
+  type KillGroup,
   LAST_MESSAGE_FILE,
 } from './agent.js';
 import type { ResolvedAgentStep } from './types.js';
@@ -79,6 +80,7 @@ describe('composeAgentPrompt', () => {
  */
 class FakeChild extends EventEmitter {
   killedWith: NodeJS.Signals | undefined;
+  pid: number | undefined;
 
   kill(signal: NodeJS.Signals): boolean {
     this.killedWith = signal;
@@ -88,30 +90,55 @@ class FakeChild extends EventEmitter {
   }
 }
 
-/** One recorded spawn call: the command and args the executor passed. */
+/** One recorded spawn call: the command, args, and options the executor passed. */
 interface SpawnCall {
   command: string;
   args: string[];
+  options: { stdio: 'ignore'; detached: boolean };
   child: FakeChild;
 }
 
 /**
  * Build an injectable spawn that records every call and hands the new child to
  * `script` so each test drives the lifecycle it needs (exit code, signal,
- * spawn error, or hang).
+ * spawn error, or hang). Each child is given a stable fake pid so a test can
+ * assert the process-group kill targets its negative.
  */
 function fakeSpawn(script: (child: FakeChild) => void): {
   spawnFn: AgentSpawn;
   calls: SpawnCall[];
 } {
   const calls: SpawnCall[] = [];
-  const spawnFn: AgentSpawn = (command, args) => {
+  const spawnFn: AgentSpawn = (command, args, options) => {
     const child = new FakeChild();
-    calls.push({ command, args: [...args], child });
+    child.pid = 4000 + calls.length;
+    calls.push({ command, args: [...args], options, child });
     script(child);
     return child;
   };
   return { spawnFn, calls };
+}
+
+/**
+ * A fake process-group killer paired with the recorded spawn calls: records
+ * every (pid, signal) it is asked to deliver, and — like an OS SIGKILL settling
+ * the group — closes the matching child (matched by `|pid|`). So a timeout test
+ * proves the negative-pid group kill without a real process group.
+ */
+function fakeKillGroup(calls: SpawnCall[]): {
+  killGroupFn: KillGroup;
+  killGroupCalls: { pid: number; signal: NodeJS.Signals }[];
+} {
+  const killGroupCalls: { pid: number; signal: NodeJS.Signals }[] = [];
+  const killGroupFn: KillGroup = (pid, signal) => {
+    killGroupCalls.push({ pid, signal });
+    for (const call of calls) {
+      if (call.child.pid === -pid) {
+        call.child.emit('close', null, signal);
+      }
+    }
+  };
+  return { killGroupFn, killGroupCalls };
 }
 
 /** A child that exits with `code` on the next tick. */
@@ -169,6 +196,8 @@ describe('agentExecutor', () => {
     expect(result.ok).toBe(true);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.command).toBe('codex');
+    // Spawned detached so it leads its own process group (timeout group-kill).
+    expect(calls[0]?.options.detached).toBe(true);
     expect(calls[0]?.args).toEqual([
       'exec',
       '-C',
@@ -333,13 +362,44 @@ describe('agentExecutor', () => {
     expect(result.error).toMatch(/terminated by signal SIGTERM/);
   });
 
-  it('kills a hung child at the wall-clock timeout and fails the step', async () => {
+  it('SIGKILLs the codex process group (negative pid) at the wall-clock timeout and fails the step', async () => {
     // The child never closes on its own; only the timeout's kill ends it.
     const { spawnFn, calls } = fakeSpawn(() => {});
-    const executor = createAgentExecutor({ spawnFn, timeoutMs: 20 });
+    const { killGroupFn, killGroupCalls } = fakeKillGroup(calls);
+    const executor = createAgentExecutor({
+      spawnFn,
+      killGroupFn,
+      timeoutMs: 20,
+    });
 
     const result = await executor.run(agentStep(), { runDir });
 
+    const pid = calls[0]?.child.pid;
+    expect(pid).toBeDefined();
+    // The whole group is reaped via the negative pid — not just the direct child.
+    expect(killGroupCalls).toEqual([
+      { pid: -(pid as number), signal: 'SIGKILL' },
+    ]);
+    expect(calls[0]?.child.killedWith).toBeUndefined();
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/timed out after 20ms/);
+  });
+
+  it('falls back to a direct child kill at the timeout when the child has no pid', async () => {
+    const { spawnFn, calls } = fakeSpawn((child) => {
+      child.pid = undefined;
+    });
+    const { killGroupFn, killGroupCalls } = fakeKillGroup(calls);
+    const executor = createAgentExecutor({
+      spawnFn,
+      killGroupFn,
+      timeoutMs: 20,
+    });
+
+    const result = await executor.run(agentStep(), { runDir });
+
+    expect(killGroupCalls).toHaveLength(0);
     expect(calls[0]?.child.killedWith).toBe('SIGKILL');
     expect(result.ok).toBe(false);
     if (result.ok) return;
