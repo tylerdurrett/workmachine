@@ -283,6 +283,8 @@ function runCodex(
 
     // Keep only the trailing STDERR_TAIL_MAX_BYTES of stderr: the fatal error is
     // near the end, and an unbounded buffer would be a leak on a chatty run.
+    // (Piping stderr couples us to the group-kill: a surviving child holding
+    // this fd open would stall `close` — see the timeout handler below.)
     let stderrTail = Buffer.alloc(0);
     child.stderr?.on('data', (chunk) => {
       stderrTail = Buffer.concat([stderrTail, chunk]);
@@ -313,6 +315,12 @@ function runCodex(
       // its own subprocesses, which orphan if only `child.kill` runs. A negative
       // pid signals the group (child is the detached group leader). Fall back to
       // a direct kill only if the pid never landed.
+      //
+      // Load-bearing for the timeout path to RESOLVE, not just orphan hygiene:
+      // because we pipe stderr for the failure tail, a surviving grandchild
+      // inherits and holds that stderr fd open, so Node's `close` never fires
+      // and this Promise never settles. Reverting to a direct-child kill would
+      // reintroduce a HANG here, not merely leak orphans.
       //
       // Best-effort, so it MUST NOT throw: `process.kill` throws synchronously
       // (ESRCH/EPERM) if the group already exited before the timer fired — and
