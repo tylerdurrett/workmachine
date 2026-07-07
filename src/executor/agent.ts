@@ -130,10 +130,16 @@ export interface AgentChild {
 /**
  * Spawn-function seam: unit tests inject a fake so they never touch a real
  * `codex` binary; production defaults to `node:child_process`'s `spawn`. The
- * child is spawned `detached` so it leads its own process group, letting the
- * timeout kill reap codex's own subprocesses (sandbox helpers, tool calls)
- * instead of orphaning them, and with stderr piped so a failure can carry a
- * bounded tail of it (stdin/stdout stay ignored).
+ * child is spawned `detached` so it leads its own process group, and the
+ * timeout's `-pid` kill directly reaps only what stays in that group: codex's
+ * launcher, its rust core, and the git repo-check helpers. Codex `setsid`s its
+ * sandbox subtree (the `codex-linux-sandbox` layers and the tool command it
+ * wraps) into separate sessions our signal can't reach; those die via
+ * codex-linux-sandbox's parent-death cascade once we kill the in-group core.
+ * So the group-kill is necessary — killing only the direct child leaves the
+ * core alive and nothing cascades — but not self-sufficient; cascade-independent
+ * hardening is tracked in #87. Stderr is piped so a failure can carry a bounded
+ * tail of it (stdin/stdout stay ignored).
  */
 export type AgentSpawn = (
   command: string,
@@ -248,8 +254,10 @@ type CodexResult = { ok: true } | { ok: false; error: string };
  * tail of it ({@link STDERR_TAIL_MAX_BYTES}).
  *
  * A wall-clock timer SIGKILLs a hung child's whole process group (the child is
- * spawned `detached`, so it leads its own group and its `-pid` reaches codex's
- * subprocesses too); the kill surfaces as a timeout failure, not a bare signal
+ * spawned `detached`, so it leads its own group); the `-pid` signal directly
+ * reaps the in-group members (launcher, rust core, git helpers) — codex's
+ * setsid'd sandbox subtree then dies via its own parent-death cascade once the
+ * core is gone (#87). The kill surfaces as a timeout failure, not a bare signal
  * exit. Never rejects: a spawn error, a signal, a non-zero exit, and a timeout
  * all resolve as `{ ok: false }` values; the last three carry the stderr tail.
  */
@@ -311,16 +319,22 @@ function runCodex(
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      // Reap the whole process group, not just the direct child: codex spawns
-      // its own subprocesses, which orphan if only `child.kill` runs. A negative
-      // pid signals the group (child is the detached group leader). Fall back to
-      // a direct kill only if the pid never landed.
+      // Kill the whole process group, not just the direct child. A negative pid
+      // signals the group (child is the detached group leader); this directly
+      // reaps the in-group members — codex's launcher, rust core, and git
+      // repo-check helpers. Codex `setsid`s its sandbox subtree out of the
+      // group, so our signal never reaches it directly; that subtree dies via
+      // codex-linux-sandbox's parent-death cascade once we've killed the
+      // in-group core (cascade-independent hardening: #87). Killing only the
+      // direct child leaves the core alive and nothing cascades. Fall back to a
+      // direct kill only if the pid never landed.
       //
       // Load-bearing for the timeout path to RESOLVE, not just orphan hygiene:
-      // because we pipe stderr for the failure tail, a surviving grandchild
+      // because we pipe stderr for the failure tail, a surviving descendant
       // inherits and holds that stderr fd open, so Node's `close` never fires
       // and this Promise never settles. Reverting to a direct-child kill would
-      // reintroduce a HANG here, not merely leak orphans.
+      // reintroduce a HANG here (the core survives, its cascade never fires),
+      // not merely leak orphans.
       //
       // Best-effort, so it MUST NOT throw: `process.kill` throws synchronously
       // (ESRCH/EPERM) if the group already exited before the timer fired — and
