@@ -4,7 +4,12 @@ export {
   composeAgentPrompt,
   createAgentExecutor,
 } from './agent.js';
-export type { AgentChild, AgentExecutorOptions, AgentSpawn } from './agent.js';
+export type {
+  AgentChild,
+  AgentExecutorOptions,
+  AgentSpawn,
+  KillGroup,
+} from './agent.js';
 export { scriptExecutor } from './script.js';
 export type {
   Executor,

@@ -76,7 +76,19 @@ async function captureArtifact(
     };
   }
 
-  const sha256 = await hashFile(absolutePath);
+  // Hashing streams the file, so a race — the file deleted or made unreadable
+  // between the stat above and the read here — rejects. Contain it as a failure
+  // value: the executor seam never throws (see captureDeclaredArtifacts).
+  let sha256: string;
+  try {
+    sha256 = await hashFile(absolutePath);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: `declared artifact "${id}" at "${path}" could not be read: ${reason}`,
+    };
+  }
   return { ok: true, entry: { id, path, sha256, size } };
 }
 
