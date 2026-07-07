@@ -179,6 +179,46 @@ describe('integration retry smoke: fail-once codex drains through one retry in a
     const layout = resolveRunDir(runsRoot, RUN_ID);
     const events = new JsonlEventLog(layout.eventsLogPath).read();
 
+    // The full retry arc, in order, drained by the single tick: the first
+    // dispatch fails, the fold-back re-dispatches, the second attempt succeeds,
+    // and the run finalizes — a `step_failed` sits between the two dispatches.
+    expect(events.map((e) => e.type)).toEqual([
+      'run_created',
+      'card_created',
+      'step_dispatched',
+      'step_failed',
+      'step_dispatched',
+      'step_succeeded',
+      'run_completed',
+    ]);
+
+    // Exactly two dispatches for the retried step, with the failure strictly
+    // between them (first dispatch -> step_failed -> second dispatch).
+    const dispatchIdx = events.flatMap((e, i) =>
+      e.type === 'step_dispatched' ? [i] : [],
+    );
+    expect(dispatchIdx).toHaveLength(2);
+    const failedIdx = events.findIndex((e) => e.type === 'step_failed');
+    expect(failedIdx).toBeGreaterThan(dispatchIdx[0] ?? -1);
+    expect(failedIdx).toBeLessThan(dispatchIdx[1] ?? -1);
+
+    // Both dispatches are agent dispatches, and their fully-composed prompts are
+    // byte-identical: an agent retry threads no failure feedback across attempts,
+    // so the second attempt resolves the exact same prompt as the first (AC4).
+    const dispatches = events.filter((e) => e.type === 'step_dispatched');
+    expect(dispatches[0]?.type).toBe('step_dispatched');
+    expect(dispatches[1]?.type).toBe('step_dispatched');
+    if (
+      dispatches[0]?.type === 'step_dispatched' &&
+      dispatches[0].stepType === 'agent' &&
+      dispatches[1]?.type === 'step_dispatched' &&
+      dispatches[1].stepType === 'agent'
+    ) {
+      expect(dispatches[0].prompt).not.toMatch(/\{\{/);
+      expect(dispatches[0].prompt).toContain('## Engine contract');
+      expect(dispatches[0].prompt).toBe(dispatches[1].prompt);
+    }
+
     // The run reached its terminal completed event.
     const completed = events.at(-1);
     expect(completed?.type).toBe('run_completed');
