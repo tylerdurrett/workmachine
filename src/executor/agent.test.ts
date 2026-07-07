@@ -10,6 +10,7 @@ import {
   createAgentExecutor,
   type KillGroup,
   LAST_MESSAGE_FILE,
+  STDERR_TAIL_MAX_BYTES,
 } from './agent.js';
 import type { ResolvedAgentStep } from './types.js';
 
@@ -81,6 +82,8 @@ describe('composeAgentPrompt', () => {
 class FakeChild extends EventEmitter {
   killedWith: NodeJS.Signals | undefined;
   pid: number | undefined;
+  /** Piped stderr, as `stdio: ['ignore', 'ignore', 'pipe']` yields. */
+  readonly stderr = new EventEmitter();
 
   kill(signal: NodeJS.Signals): boolean {
     this.killedWith = signal;
@@ -94,7 +97,7 @@ class FakeChild extends EventEmitter {
 interface SpawnCall {
   command: string;
   args: string[];
-  options: { stdio: 'ignore'; detached: boolean };
+  options: { stdio: ['ignore', 'ignore', 'pipe']; detached: boolean };
   child: FakeChild;
 }
 
@@ -148,6 +151,22 @@ const exitWith =
     queueMicrotask(() => child.emit('close', code, null));
   };
 
+/**
+ * A child that writes each `chunk` to its (piped) stderr — one `data` event
+ * apiece, so a test exercises the executor's accumulate-and-truncate path — and
+ * then closes with `code`.
+ */
+const emitStderrThenExit =
+  (chunks: readonly string[], code: number) =>
+  (child: FakeChild): void => {
+    queueMicrotask(() => {
+      for (const chunk of chunks) {
+        child.stderr.emit('data', Buffer.from(chunk));
+      }
+      child.emit('close', code, null);
+    });
+  };
+
 describe('agentExecutor', () => {
   let runDir: string;
 
@@ -196,8 +215,10 @@ describe('agentExecutor', () => {
     expect(result.ok).toBe(true);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.command).toBe('codex');
-    // Spawned detached so it leads its own process group (timeout group-kill).
+    // Spawned detached so it leads its own process group (timeout group-kill),
+    // with only stderr piped (for the failure tail); stdin/stdout stay ignored.
     expect(calls[0]?.options.detached).toBe(true);
+    expect(calls[0]?.options.stdio).toEqual(['ignore', 'ignore', 'pipe']);
     expect(calls[0]?.args).toEqual([
       'exec',
       '-C',
@@ -333,6 +354,44 @@ describe('agentExecutor', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).toMatch(/exited with code 3/);
+  });
+
+  it('carries a bounded stderr tail in the failure when codex exits non-zero', async () => {
+    const { spawnFn } = fakeSpawn(
+      emitStderrThenExit(
+        ['thread panicked at foo.rs:1\n', 'note: run with RUST_BACKTRACE=1\n'],
+        3,
+      ),
+    );
+    const executor = createAgentExecutor({ spawnFn });
+
+    const result = await executor.run(agentStep(), { runDir });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // The original exit reason survives, with the stderr tail appended.
+    expect(result.error).toMatch(/exited with code 3/);
+    expect(result.error).toContain('codex stderr');
+    expect(result.error).toContain('thread panicked at foo.rs:1');
+    expect(result.error).toContain('note: run with RUST_BACKTRACE=1');
+  });
+
+  it('truncates an over-long stderr to the last STDERR_TAIL_MAX_BYTES', async () => {
+    // Emit more than the cap across two chunks; only the trailing bytes survive.
+    const head = 'X'.repeat(STDERR_TAIL_MAX_BYTES);
+    const tailMarker = 'THE-LAST-LINE-OF-STDERR';
+    const { spawnFn } = fakeSpawn(emitStderrThenExit([head, tailMarker], 1));
+    const executor = createAgentExecutor({ spawnFn });
+
+    const result = await executor.run(agentStep(), { runDir });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // The trailing marker is kept, but the head is truncated to the cap: only
+    // the last STDERR_TAIL_MAX_BYTES bytes survive, so some leading X's are lost.
+    expect(result.error).toContain(tailMarker);
+    const retainedX = (result.error.match(/X/g) ?? []).length;
+    expect(retainedX).toBe(STDERR_TAIL_MAX_BYTES - tailMarker.length);
   });
 
   it('maps a spawn error to a failure', async () => {

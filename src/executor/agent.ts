@@ -85,6 +85,15 @@ export const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 export const LAST_MESSAGE_FILE = '.codex-last-message.txt';
 
 /**
+ * How many trailing bytes of codex's stderr to keep for failure diagnostics. A
+ * hung or crashing run can emit far more than is useful, so the executor holds
+ * only this bounded tail (the end, where the fatal error usually is) and appends
+ * it to the `step_failed` reason. Distinct from the `summary` last-message
+ * capture: that is the agent's own final words; this is the raw error channel.
+ */
+export const STDERR_TAIL_MAX_BYTES = 4 * 1024;
+
+/**
  * The slice of a spawned child the agent executor needs: its process id (to
  * signal the whole process group on timeout), kill, and the `error` / `close`
  * lifecycle events. `node:child_process`'s `ChildProcess` satisfies it
@@ -97,6 +106,13 @@ export interface AgentChild {
    * its own group), which the timeout kill signals via a negative pid.
    */
   pid?: number | undefined;
+  /**
+   * The child's stderr, piped so a failure can carry a bounded tail of it. Null
+   * when the stream was not piped; each `data` event is a chunk of raw bytes.
+   */
+  stderr: {
+    on(event: 'data', listener: (chunk: Buffer) => void): unknown;
+  } | null;
   /** Deliver a signal to the child alone (the fallback when `pid` is absent). */
   kill(signal: NodeJS.Signals): boolean;
   /** The child failed to spawn. */
@@ -113,12 +129,13 @@ export interface AgentChild {
  * `codex` binary; production defaults to `node:child_process`'s `spawn`. The
  * child is spawned `detached` so it leads its own process group, letting the
  * timeout kill reap codex's own subprocesses (sandbox helpers, tool calls)
- * instead of orphaning them.
+ * instead of orphaning them, and with stderr piped so a failure can carry a
+ * bounded tail of it (stdin/stdout stay ignored).
  */
 export type AgentSpawn = (
   command: string,
   args: readonly string[],
-  options: { stdio: 'ignore'; detached: boolean },
+  options: { stdio: ['ignore', 'ignore', 'pipe']; detached: boolean },
 ) => AgentChild;
 
 /**
@@ -153,9 +170,7 @@ export interface AgentExecutorOptions {
 export function createAgentExecutor(
   options: AgentExecutorOptions = {},
 ): Executor {
-  const spawnFn =
-    options.spawnFn ??
-    ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
+  const spawnFn = options.spawnFn ?? spawn;
   const timeoutMs = options.timeoutMs ?? AGENT_TIMEOUT_MS;
   const killGroupFn =
     options.killGroupFn ?? ((pid, signal) => void process.kill(pid, signal));
@@ -211,17 +226,18 @@ type CodexResult = { ok: true } | { ok: false; error: string };
  * (verified against codex v0.137.0, ADR-0009): `-C <runDir>` pins the working
  * root to the run dir, `--sandbox workspace-write` bounds the blast radius,
  * `--skip-git-repo-check` because a run dir is not a git repo, `--json` selects
- * JSONL event output (discarded via `stdio: 'ignore'`; sourcing `sessionRef`
- * from it stays out of scope), `-o <lastMessageFile>` captures the agent's
- * final message into a file the executor reads back as `summary`, `-m <model>`
- * only when the step sets one, and the already-composed prompt as the final
- * argument — exactly the bytes recorded on `step_dispatched`.
+ * JSONL event output (its stdout is ignored; sourcing `sessionRef` from it stays
+ * out of scope), `-o <lastMessageFile>` captures the agent's final message into a
+ * file the executor reads back as `summary`, `-m <model>` only when the step sets
+ * one, and the already-composed prompt as the final argument — exactly the bytes
+ * recorded on `step_dispatched`. Stderr is piped so a failure can carry a bounded
+ * tail of it ({@link STDERR_TAIL_MAX_BYTES}).
  *
  * A wall-clock timer SIGKILLs a hung child's whole process group (the child is
  * spawned `detached`, so it leads its own group and its `-pid` reaches codex's
  * subprocesses too); the kill surfaces as a timeout failure, not a bare signal
  * exit. Never rejects: a spawn error, a signal, a non-zero exit, and a timeout
- * all resolve as `{ ok: false }` values.
+ * all resolve as `{ ok: false }` values; the last three carry the stderr tail.
  */
 function runCodex(
   spawnFn: AgentSpawn,
@@ -246,7 +262,30 @@ function runCodex(
   ];
 
   return new Promise((resolvePromise) => {
-    const child = spawnFn('codex', args, { stdio: 'ignore', detached: true });
+    const child = spawnFn('codex', args, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      detached: true,
+    });
+
+    // Keep only the trailing STDERR_TAIL_MAX_BYTES of stderr: the fatal error is
+    // near the end, and an unbounded buffer would be a leak on a chatty run.
+    let stderrTail = Buffer.alloc(0);
+    child.stderr?.on('data', (chunk) => {
+      stderrTail = Buffer.concat([stderrTail, chunk]);
+      if (stderrTail.byteLength > STDERR_TAIL_MAX_BYTES) {
+        stderrTail = stderrTail.subarray(
+          stderrTail.byteLength - STDERR_TAIL_MAX_BYTES,
+        );
+      }
+    });
+    // Append the captured stderr tail to a failure reason, clearly delimited;
+    // a no-op when codex wrote nothing to stderr.
+    const withStderrTail = (error: string): string => {
+      const tail = stderrTail.toString('utf8').trim();
+      return tail === ''
+        ? error
+        : `${error}\n--- codex stderr (last ${STDERR_TAIL_MAX_BYTES} bytes) ---\n${tail}`;
+    };
 
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -271,27 +310,22 @@ function runCodex(
       });
     });
 
+    // Resolve a close-path failure with the stderr tail appended to its reason.
+    const fail = (reason: string): void =>
+      resolvePromise({ ok: false, error: withStderrTail(reason) });
+
     child.on('close', (code, signal) => {
       clearTimeout(timer);
       if (timedOut) {
-        resolvePromise({
-          ok: false,
-          error: `codex timed out after ${timeoutMs}ms and was killed`,
-        });
+        fail(`codex timed out after ${timeoutMs}ms and was killed`);
         return;
       }
       if (signal !== null) {
-        resolvePromise({
-          ok: false,
-          error: `codex terminated by signal ${signal}`,
-        });
+        fail(`codex terminated by signal ${signal}`);
         return;
       }
       if (code !== 0) {
-        resolvePromise({
-          ok: false,
-          error: `codex exited with code ${code}`,
-        });
+        fail(`codex exited with code ${code}`);
         return;
       }
       resolvePromise({ ok: true });
