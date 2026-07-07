@@ -71,6 +71,14 @@ const gateDecisionSchema = z.enum([
 ]) satisfies z.ZodType<GateDecision>;
 
 /**
+ * Number of automatic retries a dispatchable step (`script` or `agent`) permits
+ * before it is considered failed; a non-negative integer defaulting to `0`. A
+ * default of `0` preserves current behavior exactly — this is a pure
+ * declaration, no runtime retry logic reads it yet (a later `decide` fold does).
+ */
+const retriesSchema = z.number().int().min(0).default(0);
+
+/**
  * A single `script` step: a templated command plus optional explicit
  * dependencies and produced artifacts.
  */
@@ -86,6 +94,8 @@ const scriptStepSchema = z
     needs: z.array(z.string()).default([]),
     /** Artifacts this step produces; defaults to none. */
     produces: z.array(producedArtifactSchema).default([]),
+    /** Automatic retries permitted before failure; non-negative int, defaults to 0. */
+    retries: retriesSchema,
   })
   .strict();
 
@@ -107,6 +117,8 @@ const agentStepSchema = z
     produces: z.array(producedArtifactSchema).default([]),
     /** Optional model override for the agent invocation. */
     model: z.string().min(1).optional(),
+    /** Automatic retries permitted before failure; non-negative int, defaults to 0. */
+    retries: retriesSchema,
   })
   .strict();
 

@@ -257,7 +257,14 @@ describe('foldRunState card_created handling', () => {
     slug: 'tiny-smoke',
     inputs: {},
     steps: [
-      { id: 'greet', type: 'script', run: 'true', needs: [], produces: [] },
+      {
+        id: 'greet',
+        type: 'script',
+        run: 'true',
+        needs: [],
+        produces: [],
+        retries: 0,
+      },
     ],
   };
 
@@ -306,6 +313,7 @@ describe('foldRunState agent summary handling', () => {
         prompt: 'Write a draft',
         needs: [],
         produces: [],
+        retries: 0,
       },
     ],
   };
