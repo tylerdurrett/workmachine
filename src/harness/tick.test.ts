@@ -186,11 +186,65 @@ steps:
       'step_failed',
       'run_failed',
     ]);
+    // The terminal `run_failed` references the failing step by id; the step's
+    // failure detail lives once on `step_failed`, not re-inlined here (#85).
+    const stepFailed = events.find((e) => e.type === 'step_failed');
+    expect(stepFailed?.type).toBe('step_failed');
+    if (stepFailed?.type === 'step_failed') {
+      expect(stepFailed.reason).toMatch(/exited with code 3/);
+    }
     const failed = events.at(-1);
     expect(failed?.type).toBe('run_failed');
     if (failed?.type === 'run_failed') {
-      expect(failed.reason).toContain('boom');
-      expect(failed.reason).toMatch(/exited with code 3/);
+      expect(failed.reason).toBe("step 'boom' failed");
+      // The detail is NOT re-embedded in the terminal reason.
+      expect(failed.reason).not.toMatch(/exited with code 3/);
+    }
+  });
+
+  it('does not re-inline the failing step detail into run_failed (#85)', async () => {
+    // A distinctive multi-line, large failure detail: if finalize inlined
+    // `step.reason` we would see it verbatim on `run_failed` too.
+    const detail = ['ERROR: catastrophe', 'x'.repeat(2048), 'stack trace here']
+      .join('\n');
+    const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: boom
+    type: script
+    run: 'noop'
+`);
+    const { runDir, log } = seedRun(workflow, [created()]);
+
+    const failing: Executor = {
+      run: () => Promise.resolve({ ok: false, error: detail }),
+    };
+
+    await callTick({
+      workflow,
+      log,
+      runDir,
+      executors: { script: failing },
+    });
+
+    const events = log.read();
+
+    // The full detail is stored exactly once — on `step_failed`.
+    const stepFailed = events.find((e) => e.type === 'step_failed');
+    expect(stepFailed?.type).toBe('step_failed');
+    if (stepFailed?.type === 'step_failed') {
+      expect(stepFailed.reason).toBe(detail);
+    }
+
+    // The terminal `run_failed` references the step id but does NOT re-embed
+    // the detail (no double-write into the durable log / run.yaml projection).
+    const failed = events.at(-1);
+    expect(failed?.type).toBe('run_failed');
+    if (failed?.type === 'run_failed') {
+      expect(failed.reason).toBe("step 'boom' failed");
+      expect(failed.reason).not.toContain(detail);
+      expect(failed.reason).not.toContain('catastrophe');
+      expect(failed.reason).not.toContain('x'.repeat(2048));
     }
   });
 
