@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -154,14 +154,21 @@ const exitWith =
 /**
  * A child that writes each `chunk` to its (piped) stderr — one `data` event
  * apiece, so a test exercises the executor's accumulate-and-truncate path — and
- * then closes with `code`.
+ * then closes with `code`. When `streamError` is given, the stderr stream emits
+ * it (as a real `Readable` does on EPIPE / premature destroy) after the chunks
+ * and before the close: with no `error` listener that bare emit would throw
+ * synchronously, so it drives the executor's swallow path; the `data` chunks are
+ * the tail buffered before the break.
  */
 const emitStderrThenExit =
-  (chunks: readonly string[], code: number) =>
+  (chunks: readonly string[], code: number, streamError?: Error) =>
   (child: FakeChild): void => {
     queueMicrotask(() => {
       for (const chunk of chunks) {
         child.stderr.emit('data', Buffer.from(chunk));
+      }
+      if (streamError !== undefined) {
+        child.stderr.emit('error', streamError);
       }
       child.emit('close', code, null);
     });
@@ -394,6 +401,28 @@ describe('agentExecutor', () => {
     expect(retainedX).toBe(STDERR_TAIL_MAX_BYTES - tailMarker.length);
   });
 
+  it('contains a stderr stream error and still resolves the step normally', async () => {
+    // The piped stderr breaks (EPIPE) mid-run. With no `error` listener Node
+    // would throw it uncaught; the executor must swallow it, keep the tail it
+    // already buffered, and resolve the non-zero exit as a failure.
+    const { spawnFn } = fakeSpawn(
+      emitStderrThenExit(
+        ['partial diagnostics before the break\n'],
+        3,
+        new Error('EPIPE: broken pipe'),
+      ),
+    );
+    const executor = createAgentExecutor({ spawnFn });
+
+    const result = await executor.run(agentStep(), { runDir });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/exited with code 3/);
+    // The tail buffered before the stream error still rides along on the failure.
+    expect(result.error).toContain('partial diagnostics before the break');
+  });
+
   it('maps a spawn error to a failure', async () => {
     const { spawnFn } = fakeSpawn((child) => {
       queueMicrotask(() => child.emit('error', new Error('ENOENT: no codex')));
@@ -463,6 +492,48 @@ describe('agentExecutor', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).toMatch(/timed out after 20ms/);
+  });
+
+  it('contains an ESRCH throw from the timeout kill and still fails the step (no reject)', async () => {
+    // Real race: codex self-exits just before the timer fires, its `close` not
+    // yet delivered. The timer fires and the group kill throws ESRCH (the group
+    // is already gone). The executor must swallow the throw; the in-flight
+    // `close` (Node still delivers it for an already-exited child) then resolves
+    // the step as a timeout failure — not an uncaught crash or a hung promise.
+    const { spawnFn, calls } = fakeSpawn(() => {});
+    const killGroupFn: KillGroup = () => {
+      // The OS still delivers `close` for the already-exited child.
+      queueMicrotask(() => calls[0]?.child.emit('close', null, null));
+      throw new Error('kill ESRCH');
+    };
+    const executor = createAgentExecutor({
+      spawnFn,
+      killGroupFn,
+      timeoutMs: 20,
+    });
+
+    const result = await executor.run(agentStep(), { runDir });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/timed out after 20ms/);
+  });
+
+  it('fails as a value (never throws) when the stale last-message file cannot be cleared', async () => {
+    // Force the pre-spawn clear to reject deterministically: a directory sits
+    // where the last-message file path points, so `rm(..., { force: true })`
+    // rejects with EISDIR (force suppresses only a missing file). The seam must
+    // contain that as a failure value and never spawn a child.
+    const { spawnFn, calls } = fakeSpawn(exitWith(0));
+    await mkdir(join(runDir, LAST_MESSAGE_FILE));
+    const executor = createAgentExecutor({ spawnFn });
+
+    const result = await executor.run(agentStep(), { runDir });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/could not clear stale last-message file/);
+    expect(calls).toHaveLength(0);
   });
 
   it('returns { ok: false } for a non-agent resolved step without spawning', async () => {

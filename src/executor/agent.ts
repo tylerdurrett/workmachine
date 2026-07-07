@@ -109,9 +109,12 @@ export interface AgentChild {
   /**
    * The child's stderr, piped so a failure can carry a bounded tail of it. Null
    * when the stream was not piped; each `data` event is a chunk of raw bytes.
+   * The `error` event (e.g. EPIPE / premature destroy) must have a listener or
+   * Node throws it as an uncaught exception, escaping the never-throws seam.
    */
   stderr: {
     on(event: 'data', listener: (chunk: Buffer) => void): unknown;
+    on(event: 'error', listener: (err: Error) => void): unknown;
   } | null;
   /** Deliver a signal to the child alone (the fallback when `pid` is absent). */
   kill(signal: NodeJS.Signals): boolean;
@@ -187,8 +190,19 @@ export function createAgentExecutor(
       const lastMessageFile = join(ctx.runDir, LAST_MESSAGE_FILE);
       // Clear any final message left by a prior attempt so a spawn failure can
       // never attach a stale summary — after the child closes, a file present
-      // here was written by this invocation.
-      await rm(lastMessageFile, { force: true });
+      // here was written by this invocation. `force` swallows a missing file,
+      // but a locked/unreadable one (EACCES/EPERM/EBUSY) still rejects; contain
+      // that as a failure value so the seam never throws before a child exists
+      // to resolve it (and never risks attaching the un-cleared stale summary).
+      try {
+        await rm(lastMessageFile, { force: true });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          error: `could not clear stale last-message file: ${reason}`,
+        };
+      }
 
       const exit = await runCodex(
         spawnFn,
@@ -278,6 +292,11 @@ function runCodex(
         );
       }
     });
+    // A stderr stream `error` (EPIPE / premature destroy) with no listener makes
+    // Node throw, escaping the never-throws seam. Swallow it: the child's
+    // `close`/`error` handler still resolves the step, carrying whatever tail was
+    // buffered before the stream broke.
+    child.stderr?.on('error', () => {});
     // Append the captured stderr tail to a failure reason, clearly delimited;
     // a no-op when codex wrote nothing to stderr.
     const withStderrTail = (error: string): string => {
@@ -294,11 +313,20 @@ function runCodex(
       // its own subprocesses, which orphan if only `child.kill` runs. A negative
       // pid signals the group (child is the detached group leader). Fall back to
       // a direct kill only if the pid never landed.
-      const { pid } = child;
-      if (pid === undefined) {
-        child.kill('SIGKILL');
-      } else {
-        killGroupFn(-pid, 'SIGKILL');
+      //
+      // Best-effort, so it MUST NOT throw: `process.kill` throws synchronously
+      // (ESRCH/EPERM) if the group already exited before the timer fired — and
+      // in a timer callback that throw would be uncaught, crashing the harness.
+      // Swallow it; Node still delivers `close`, which resolves the step.
+      try {
+        const { pid } = child;
+        if (pid === undefined) {
+          child.kill('SIGKILL');
+        } else {
+          killGroupFn(-pid, 'SIGKILL');
+        }
+      } catch {
+        // best-effort reap; resolution comes from the child's `close`/`exit`.
       }
     }, timeoutMs);
 
