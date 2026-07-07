@@ -423,9 +423,15 @@ function finalize(
     (s) => state.steps[s.id]?.status === 'failed',
   );
   if (failed) {
+    // Reference the failing step by id rather than inlining its `reason`
+    // (a bounded stderr tail, up to 4KB). The detail is already persisted once,
+    // on that step's `step_failed` event; re-embedding it here would write the
+    // same tail a second time into the durable log and the run.yaml projection
+    // (#85). Consumers that want the detail read it from the referenced
+    // `step_failed` event.
     append({
       type: 'run_failed',
-      reason: `step '${failed.id}' failed: ${state.steps[failed.id]?.reason ?? 'unknown error'}`,
+      reason: `step '${failed.id}' failed`,
     });
     return true;
   }
