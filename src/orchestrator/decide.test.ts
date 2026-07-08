@@ -82,6 +82,23 @@ steps:
     allowed_decisions: [approve]
 `);
 
+/**
+ * A single script step with a `retries: 1` budget (#89): one automatic retry is
+ * permitted, so the first `step_failed` folds back to dispatchable and only the
+ * second (retries + 1) failure is terminal.
+ */
+const retryOnce: WorkflowDefinition = loadWorkflow(`
+slug: retry-once
+steps:
+  - id: greet
+    type: script
+    run: 'echo hi > {{artifacts.out.path}}'
+    retries: 1
+    produces:
+      - id: out
+        path: artifacts/out.txt
+`);
+
 /** Build a `gate_opened` event for a review step (gateId === stepId here). */
 function gateOpened(seq: number, stepId: string): EngineEvent {
   return {
@@ -171,6 +188,22 @@ function succeeded(
     ts: '2026-06-07T12:00:02.000Z',
     stepId,
     artifacts,
+  };
+}
+
+/** Build a `step_failed` event for a step. */
+function failed(
+  seq: number,
+  stepId: string,
+  reason = 'exit code 1',
+): EngineEvent {
+  return {
+    type: 'step_failed',
+    runId,
+    seq,
+    ts: '2026-06-07T12:00:02.000Z',
+    stepId,
+    reason,
   };
 }
 
@@ -491,6 +524,53 @@ const cases: DecideCase[] = [
     ],
     expected: { kind: 'wait' },
   },
+
+  // ── Retry fold-back (#89) ───────────────────────────────────────────────
+  {
+    name: 'retry default 0: the first step_failed is terminal, decide does not re-dispatch',
+    // `oneStep` declares no `retries`, so the budget defaults to 0: the first
+    // failure folds to `failed` and nothing is re-dispatched. The run is not yet
+    // marked run_failed, so decide waits for harness finalization.
+    workflow: oneStep,
+    events: [created(0), dispatched(1, 'greet'), failed(2, 'greet')],
+    expected: { kind: 'wait' },
+  },
+  {
+    name: 'retry budget 1: a first step_failed folds the step back to dispatchable',
+    // With one retry remaining (failures 1 ≤ retries 1) the failed step folds
+    // back to pending, so decide re-dispatches the same step (a second attempt).
+    workflow: retryOnce,
+    events: [created(0), dispatched(1, 'greet'), failed(2, 'greet')],
+    expected: { kind: 'run_step', stepId: 'greet' },
+  },
+  {
+    name: 'retry budget 1 exhausted: retries+1 failures fold to failed, no re-dispatch',
+    // Two failures (retries + 1) exhaust the budget: the step stays `failed` and
+    // decide waits for the harness to finalize run_failed rather than retrying.
+    workflow: retryOnce,
+    events: [
+      created(0),
+      dispatched(1, 'greet'),
+      failed(2, 'greet'),
+      dispatched(3, 'greet'),
+      failed(4, 'greet'),
+    ],
+    expected: { kind: 'wait' },
+  },
+  {
+    name: 'retry crash mid-attempt: a dangling dispatch after a prior failure re-dispatches',
+    // The first failure folded `greet` back to pending; a later dispatch with no
+    // terminal event is a crash mid-attempt. The dangling-dispatch unwind resets
+    // it to pending, so decide re-dispatches the same step deterministically.
+    workflow: retryOnce,
+    events: [
+      created(0),
+      dispatched(1, 'greet'),
+      failed(2, 'greet'),
+      dispatched(3, 'greet'),
+    ],
+    expected: { kind: 'run_step', stepId: 'greet' },
+  },
 ];
 
 describe('decide (pure event-log fold)', () => {
@@ -600,5 +680,81 @@ describe('foldRunState — gate lifecycle', () => {
     expect(state.steps.build?.status).toBe('succeeded');
     expect(state.steps.review?.status).toBe('approved');
     expect(state.openGate).toBeUndefined();
+  });
+});
+
+describe('foldRunState — retry fold-back (#89)', () => {
+  it('default retries 0: the first step_failed is terminal (unchanged behavior)', () => {
+    const state = foldRunState(oneStep, [
+      created(0),
+      dispatched(1, 'greet'),
+      failed(2, 'greet', 'exit code 1'),
+    ]);
+
+    expect(state.steps.greet?.status).toBe('failed');
+    expect(state.steps.greet?.reason).toBe('exit code 1');
+  });
+
+  it('budget 1, first failure: folds back to a fresh pending (no stale command/reason)', () => {
+    const state = foldRunState(retryOnce, [
+      created(0),
+      dispatched(1, 'greet'),
+      failed(2, 'greet', 'exit code 1'),
+    ]);
+
+    // A fresh pendingStep — nothing from the failed attempt leaks forward, so
+    // the next dispatch resolves an identical command (no feedback threading).
+    expect(state.steps.greet).toEqual({ stepId: 'greet', status: 'pending' });
+  });
+
+  it('budget 1, fail then succeed: the second attempt succeeds terminally', () => {
+    const state = foldRunState(retryOnce, [
+      created(0),
+      dispatched(1, 'greet'),
+      failed(2, 'greet'),
+      dispatched(3, 'greet'),
+      succeeded(4, 'greet', [artifact]),
+    ]);
+
+    expect(state.steps.greet?.status).toBe('succeeded');
+    expect(state.artifacts).toEqual([artifact]);
+  });
+
+  it('budget 1 exhausted: the retries+1 failure stays failed, carrying its reason', () => {
+    const state = foldRunState(retryOnce, [
+      created(0),
+      dispatched(1, 'greet'),
+      failed(2, 'greet', 'first'),
+      dispatched(3, 'greet'),
+      failed(4, 'greet', 'final'),
+    ]);
+
+    expect(state.steps.greet?.status).toBe('failed');
+    expect(state.steps.greet?.reason).toBe('final');
+  });
+
+  it('crash mid-attempt: a dangling dispatch after a prior failure folds to pending', () => {
+    const state = foldRunState(retryOnce, [
+      created(0),
+      dispatched(1, 'greet'),
+      failed(2, 'greet'),
+      dispatched(3, 'greet'),
+    ]);
+
+    expect(state.steps.greet?.status).toBe('pending');
+  });
+
+  it('re-dispatch is a plain fold-back: the post-failure decision is byte-identical to the first', () => {
+    // No backoff, no scheduling, no failure-feedback threading: `decide` names
+    // the same move after a retry-eligible failure as it did on the fresh run.
+    const first = decide(retryOnce, [created(0)]);
+    const afterFailure = decide(retryOnce, [
+      created(0),
+      dispatched(1, 'greet'),
+      failed(2, 'greet', 'boom'),
+    ]);
+
+    expect(first).toEqual({ kind: 'run_step', stepId: 'greet' });
+    expect(afterFailure).toEqual(first);
   });
 });
