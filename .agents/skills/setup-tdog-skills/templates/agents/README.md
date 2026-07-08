@@ -18,11 +18,10 @@ The same primitives apply at every tier. Once you understand the loop, you under
 
 ## The hierarchy
 
-Six tiers, top to bottom. Each tier is a unit of work; bigger tiers contain smaller tiers.
+Five tiers, top to bottom. Each tier is a unit of work; bigger tiers contain smaller tiers.
 
 | Tier           | What it is                                                                              | Lives in                          |
 | -------------- | --------------------------------------------------------------------------------------- | --------------------------------- |
-| **Roadmap**    | The capacity-honest sequencing of bets the project is making.                           | `docs/roadmap.md`                 |
 | **Initiative** | A directed effort toward an outcome. Groups multiple features. Concurrent OK.           | GitHub issue, `size:initiative`   |
 | **Feature**    | A meaningful unit of user-facing value. Decomposes into slices. Has an integration branch. | GitHub issue, `size:feature`   |
 | **Slice**      | A vertical cut of a feature, demoable end-to-end. Contains multiple tasks.              | GitHub issue, `size:slice`        |
@@ -155,13 +154,6 @@ Every workflow skill that produces a durable artifact ends with the same three-b
 - **You have an alignment session ready to capture**: run `/to-spec`.
 - **You have a freshly captured spec on the tracker**: run `/triage <N>` to verify size, seed bookkeeping, and route it.
 - **You're not sure where you are**: run `/status`.
-
-## What sits above the loop
-
-- **`docs/north-star.md`**: the project's vision and direction. Maintained by `/north-star`.
-- **`docs/roadmap.md`**: capacity-honest sequencing of initiatives. Three buckets: In flight (cap: 1), Next (sequenced, 2 to 3), Vibes backlog (unordered hypotheticals). Maintained by `/roadmap-review`.
-
-These are doc-side artifacts, not tracker artifacts. They feed the loop by providing the context an initiative is captured against; they're not themselves part of the loop.
 
 ## Why this shape
 

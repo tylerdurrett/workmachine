@@ -2,7 +2,7 @@
 
 Specs (initiatives, features, slices, tasks) for this repo all live as GitHub issues on `<owner>/<repo>`. Use the `gh` CLI for all operations. `gh` resolves the repo automatically from `git remote -v` (the `origin` remote points at `<owner>/<repo>`).
 
-For the canonical hierarchy and label vocabulary, see [triage-labels.md](triage-labels.md). At a glance: roadmap → initiative → feature → slice → task → PR. Every issue is a "spec" of some size; size determines which decomposition step applies next.
+For the canonical hierarchy and label vocabulary, see [triage-labels.md](triage-labels.md). At a glance: initiative → feature → slice → task → PR. Every issue is a "spec" of some size; size determines which decomposition step applies next.
 
 ## Conventions
 
@@ -47,4 +47,4 @@ This returns every child issue attached as a sub-issue of #59. Combine with `--s
 
 ### When there is no parent
 
-A skill that creates a top-level spec from a roadmap bullet (or from a freeform conversation that doesn't reference an existing parent) has no existing parent issue to attach to. In that case the skill skips the attach call entirely; there is nothing to link to. This is the documented no-parent path for orphan specs at any size.
+A skill that creates a top-level spec from a freeform conversation that doesn't reference an existing parent has no existing parent issue to attach to. In that case the skill skips the attach call entirely; there is nothing to link to. This is the documented no-parent path for orphan specs at any size.

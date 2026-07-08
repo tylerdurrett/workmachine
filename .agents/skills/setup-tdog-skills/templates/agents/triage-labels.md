@@ -6,7 +6,7 @@ Issues are labeled along four orthogonal axes: **size** (what tier the work sits
 
 The canonical hierarchy:
 
-> roadmap → initiative → feature → slice → task → PR
+> initiative → feature → slice → task → PR
 
 Every issue on the tracker is a **spec** (the generic name for a captured set of specifications, regardless of tier). Sizing happens at triage. Bigger sizes decompose into smaller-sized children until everything reaches task-size, at which point it ships.
 

@@ -11,13 +11,11 @@ A `size:initiative` GitHub issue is a parent spec that groups related features u
 Initiatives sit one level above features in the planning hierarchy:
 
 ```
-north-star (docs/north-star.md)
-  └── roadmap (docs/roadmap.md)
-       └── initiative (size:initiative GitHub issue)
-            └── feature (size:feature GitHub issue)
-                 └── slice (size:slice GitHub issue)
-                      └── task (size:task GitHub issue)
-                           └── PR
+initiative (size:initiative GitHub issue)
+  └── feature (size:feature GitHub issue)
+       └── slice (size:slice GitHub issue)
+            └── task (size:task GitHub issue)
+                 └── PR
 ```
 
 Concurrent initiatives are normal. Two unrelated bodies of work (e.g. a billing-rewrite initiative and a docs-system initiative) can run in parallel without conflict; they share no state.
@@ -101,7 +99,7 @@ Watch for these drift signals:
 - Candidate bullets acquire sub-bullets, prose, or implementation detail.
 - The Out of scope section is empty (suggests the author hasn't done the work of saying no to anything).
 
-When any of these fire, the initiative is bloating into a mini-feature. Pull back: split the initiative, narrow it, or kick items to the roadmap doc as hypothetical work.
+When any of these fire, the initiative is bloating into a mini-feature. Pull back: split the initiative, narrow it, or defer items as hypothetical work.
 
 ## Manual closure
 

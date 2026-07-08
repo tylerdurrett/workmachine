@@ -2,7 +2,7 @@
 
 Specs (initiatives, features, slices, tasks) for this repo live as markdown files under `.scratch/`. This is the offline alternative to the GitHub-backed tracker; pick it when there's no remote, when you're working on a one-person prototype, or when you want everything to live in-repo.
 
-For the canonical hierarchy and label vocabulary, see [triage-labels.md](triage-labels.md). At a glance: roadmap → initiative → feature → slice → task → PR. Every file is a "spec" of some size; size determines which decomposition step applies next.
+For the canonical hierarchy and label vocabulary, see [triage-labels.md](triage-labels.md). At a glance: initiative → feature → slice → task → PR. Every file is a "spec" of some size; size determines which decomposition step applies next.
 
 > **Heads-up.** The workflow skills (`/triage`, `/decompose`, `/execute`, `/ship`, `/defer`, `/status`, etc.) are currently written against the GitHub tracker — they shell out to `gh issue *`. Picking local-markdown means the spec files exist and this doc describes the shape, but those skills will refuse or no-op until they grow a local-markdown code path. Treat this variant as the file convention; expect to patch the consumer skills before they work end-to-end. The convention below is what they will read once patched.
 
@@ -73,4 +73,4 @@ There is no separate "sub-issue attach" call — setting the frontmatter is the 
 
 ## When there is no parent
 
-A top-level spec (roadmap-bullet-to-initiative, or an orphan ad-hoc slice/task) sets `part-of:` to empty. This is the documented no-parent path; downstream walks (`/execute`'s parent-chain walk per [ADR-0001](../adr/0001-issues-branch-from-parent-integration-branch.md)) terminate at `main` as the fallback base branch.
+A top-level spec (a freeform initiative, or an orphan ad-hoc slice/task) sets `part-of:` to empty. This is the documented no-parent path; downstream walks (`/execute`'s parent-chain walk per [ADR-0001](../adr/0001-issues-branch-from-parent-integration-branch.md)) terminate at `main` as the fallback base branch.
