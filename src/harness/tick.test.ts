@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { EngineEvent } from '../domain/index.js';
-import { scriptExecutor } from '../executor/index.js';
+import { composeAgentPrompt, scriptExecutor } from '../executor/index.js';
+import type { Executor, ResolvedStep } from '../executor/index.js';
 import { JsonlEventLog, createRunDir, resolveRunDir } from '../run/index.js';
 import {
   type CommandCursor,
@@ -14,6 +15,7 @@ import {
 import { loadWorkflow } from '../workflow/index.js';
 import type { WorkflowDefinition } from '../workflow/index.js';
 import { tick } from './tick.js';
+import type { TickDeps } from './tick.js';
 
 /**
  * The harness integration test: it drives the real `tick` loop against a real
@@ -25,6 +27,20 @@ import { tick } from './tick.js';
 const runId = '20260607T120000Z-tiny-smoke-ab12';
 /** Deterministic clock so appended `ts` stamps are stable across runs. */
 const now = (): string => '2026-06-07T12:00:00.000Z';
+/** The script-only executor registry most tests tick with. */
+const executors = { script: scriptExecutor };
+
+/**
+ * Invoke `tick` with the deps every case shares — the script executor registry
+ * and the deterministic clock — so each test states only what it varies (its
+ * `workflow`/`log`/`runDir`, plus any `tracker` or cursor). Overrides win, so a
+ * case can swap in an agent-only registry or add a tracker.
+ */
+function callTick(
+  overrides: Pick<TickDeps, 'workflow' | 'log' | 'runDir'> & Partial<TickDeps>,
+): Promise<void> {
+  return tick({ executors, now, ...overrides });
+}
 
 describe('tick (full read→decide→resolve→execute→append loop)', () => {
   let runsRoot: string;
@@ -78,7 +94,7 @@ steps:
 `);
     const { runDir, log } = seedRun(workflow, [created()]);
 
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     expect(events.map((e) => e.type)).toEqual([
@@ -91,6 +107,12 @@ steps:
     const dispatched = events[1];
     expect(dispatched?.type).toBe('step_dispatched');
     if (dispatched?.type === 'step_dispatched') {
+      expect(dispatched.stepType).toBe('script');
+    }
+    if (
+      dispatched?.type === 'step_dispatched' &&
+      dispatched.stepType === 'script'
+    ) {
       expect(dispatched.command).toBe('printf hi > artifacts/out.txt');
       expect(dispatched.command).not.toMatch(/\{\{/);
     }
@@ -128,12 +150,15 @@ steps:
 `);
     const { runDir, log } = seedRun(workflow, [created({ msg: 'hello run' })]);
 
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     const dispatched = events.find((e) => e.type === 'step_dispatched');
     expect(dispatched?.type).toBe('step_dispatched');
-    if (dispatched?.type === 'step_dispatched') {
+    if (
+      dispatched?.type === 'step_dispatched' &&
+      dispatched.stepType === 'script'
+    ) {
       expect(dispatched.command).toBe("printf 'hello run' > artifacts/out.txt");
     }
     expect(events.at(-1)?.type).toBe('run_completed');
@@ -152,7 +177,7 @@ steps:
 `);
     const { runDir, log } = seedRun(workflow, [created()]);
 
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     expect(events.map((e) => e.type)).toEqual([
@@ -161,11 +186,65 @@ steps:
       'step_failed',
       'run_failed',
     ]);
+    // The terminal `run_failed` references the failing step by id; the step's
+    // failure detail lives once on `step_failed`, not re-inlined here (#85).
+    const stepFailed = events.find((e) => e.type === 'step_failed');
+    expect(stepFailed?.type).toBe('step_failed');
+    if (stepFailed?.type === 'step_failed') {
+      expect(stepFailed.reason).toMatch(/exited with code 3/);
+    }
     const failed = events.at(-1);
     expect(failed?.type).toBe('run_failed');
     if (failed?.type === 'run_failed') {
-      expect(failed.reason).toContain('boom');
-      expect(failed.reason).toMatch(/exited with code 3/);
+      expect(failed.reason).toBe("step 'boom' failed");
+      // The detail is NOT re-embedded in the terminal reason.
+      expect(failed.reason).not.toMatch(/exited with code 3/);
+    }
+  });
+
+  it('does not re-inline the failing step detail into run_failed (#85)', async () => {
+    // A distinctive multi-line, large failure detail: if finalize inlined
+    // `step.reason` we would see it verbatim on `run_failed` too.
+    const detail = ['ERROR: catastrophe', 'x'.repeat(2048), 'stack trace here']
+      .join('\n');
+    const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: boom
+    type: script
+    run: 'noop'
+`);
+    const { runDir, log } = seedRun(workflow, [created()]);
+
+    const failing: Executor = {
+      run: () => Promise.resolve({ ok: false, error: detail }),
+    };
+
+    await callTick({
+      workflow,
+      log,
+      runDir,
+      executors: { script: failing },
+    });
+
+    const events = log.read();
+
+    // The full detail is stored exactly once — on `step_failed`.
+    const stepFailed = events.find((e) => e.type === 'step_failed');
+    expect(stepFailed?.type).toBe('step_failed');
+    if (stepFailed?.type === 'step_failed') {
+      expect(stepFailed.reason).toBe(detail);
+    }
+
+    // The terminal `run_failed` references the step id but does NOT re-embed
+    // the detail (no double-write into the durable log / run.yaml projection).
+    const failed = events.at(-1);
+    expect(failed?.type).toBe('run_failed');
+    if (failed?.type === 'run_failed') {
+      expect(failed.reason).toBe("step 'boom' failed");
+      expect(failed.reason).not.toContain(detail);
+      expect(failed.reason).not.toContain('catastrophe');
+      expect(failed.reason).not.toContain('x'.repeat(2048));
     }
   });
 
@@ -182,10 +261,10 @@ steps:
 `);
     const { runDir, log } = seedRun(workflow, [created()]);
 
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
     const afterFirst = log.read();
 
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
     const afterSecond = log.read();
 
     // The second tick sees `done` immediately and appends nothing.
@@ -257,7 +336,7 @@ steps:
     const workflow = loadWorkflow(GATED_WORKFLOW);
     const { log, runDir } = seedRun(workflow, [created()]);
 
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     // The run dispatches the script step, then opens the gate and waits — no
@@ -281,7 +360,7 @@ steps:
     const { log, runDir } = seedRun(workflow, [created()]);
 
     // First tick: run the step and open the gate.
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
     // A reviewer approves the open gate.
     log.append(
       command(log.read().length, {
@@ -291,7 +370,7 @@ steps:
       }),
     );
     // Second tick: validate the command, decide the gate, finalize.
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     expect(events.map((e) => e.type)).toEqual([
@@ -315,7 +394,7 @@ steps:
     const workflow = loadWorkflow(GATED_WORKFLOW);
     const { log, runDir } = seedRun(workflow, [created()]);
 
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
     log.append(
       command(log.read().length, {
         gateId: 'review',
@@ -323,7 +402,7 @@ steps:
         decision: 'reject',
       }),
     );
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     expect(events.map((e) => e.type)).toEqual([
@@ -346,7 +425,7 @@ steps:
     const workflow = loadWorkflow(GATED_WORKFLOW);
     const { log, runDir } = seedRun(workflow, [created()]);
 
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
     log.append(
       command(log.read().length, {
         gateId: 'review',
@@ -354,11 +433,11 @@ steps:
         decision: 'approve',
       }),
     );
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
     const afterDecision = log.read();
 
     // Re-ticking a finalized gated run sees `done` and appends nothing more.
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
     expect(log.read()).toEqual(afterDecision);
   });
 
@@ -382,11 +461,12 @@ steps:
         seq: 1,
         ts: now(),
         stepId: 'greet',
+        stepType: 'script',
         command: 'printf hi > artifacts/out.txt',
       },
     ]);
 
-    await tick({ workflow, log, executor: scriptExecutor, runDir, now });
+    await callTick({ workflow, log, runDir });
 
     const events = log.read();
     // The fold unwound the dangling dispatch to pending, so tick re-dispatched.
@@ -427,14 +507,7 @@ steps:
     it('renders the review card into the run card on gate_opened', async () => {
       const { tracker, cardId, log, runDir } = await seedCardedRun();
 
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-      });
+      await callTick({ workflow, log, runDir, tracker });
 
       const stored = tracker.cardState(cardId);
       // The single review card was rendered once, into the run's existing card.
@@ -450,14 +523,7 @@ steps:
     it('renders into the run-recorded card ref, never minting a new card', async () => {
       const { tracker, cardId, log, runDir } = await seedCardedRun();
 
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-      });
+      await callTick({ workflow, log, runDir, tracker });
 
       // The harness rendered into the card the run recorded on `card_created`
       // (`card-1`), not a freshly minted one — the seam reuses the CardRef.
@@ -470,14 +536,7 @@ steps:
       const { tracker, cardId, log, runDir } = await seedCardedRun();
 
       // First tick: run the work, open the gate, render the card.
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-      });
+      await callTick({ workflow, log, runDir, tracker });
       const renderCountAfterOpen = tracker.cardState(cardId)?.renderCount;
 
       // A reviewer requests changes with feedback. The fold loops the work and
@@ -491,14 +550,7 @@ steps:
           feedback: 'please tighten the copy',
         }),
       );
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-      });
+      await callTick({ workflow, log, runDir, tracker });
 
       const stored = tracker.cardState(cardId);
       // Same card, rendered again (not a new one), now carrying the revision.
@@ -513,14 +565,7 @@ steps:
       const { log, runDir } = seedRun(workflow, [created()]);
       const tracker = new FakeTracker();
 
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-      });
+      await callTick({ workflow, log, runDir, tracker });
 
       // The gate still opened — the projection is a silent no-op without a card.
       expect(log.read().map((e) => e.type)).toContain('gate_opened');
@@ -572,15 +617,7 @@ steps:
       ]);
       const cursor = cursorStore();
       // First tick: run the script step and open the gate (no comments yet).
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
       return { tracker, card, log, runDir, cursor };
     }
 
@@ -590,15 +627,7 @@ steps:
       const { tracker, card, log, runDir, cursor } = await openGatedRun();
       await tracker.seedComment(card, '/approve', 'reviewer');
 
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       const events = log.read();
       expect(events.map((e) => e.type)).toEqual([
@@ -630,15 +659,7 @@ steps:
         'reviewer',
       );
 
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       const events = log.read();
       const received = events.find((e) => e.type === 'command_received');
@@ -660,15 +681,7 @@ steps:
       const { tracker, card, log, runDir, cursor } = await openGatedRun();
       await tracker.seedComment(card, '/reject not shippable', 'reviewer');
 
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       const events = log.read();
       expect(events.at(-1)?.type).toBe('run_failed');
@@ -684,15 +697,7 @@ steps:
       await tracker.seedComment(card, '/approve', 'reviewer');
 
       // First poll ingests the comment and advances the cursor.
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
       const afterFirst = log.read();
       expect(
         afterFirst.filter((e) => e.type === 'command_received'),
@@ -702,15 +707,7 @@ steps:
       // re-reads the comment from the beginning, but dedup off the log keeps it
       // from being ingested a second time (ADR-0006).
       cursor.lose();
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       const received = log.read().filter((e) => e.type === 'command_received');
       expect(received).toHaveLength(1);
@@ -725,27 +722,11 @@ steps:
       await tracker.seedComment(card, '/approve', 'reviewer');
 
       // First approve closes the gate and completes the run.
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       // A later reviewer leaves a second valid command on the now-closed gate.
       await tracker.seedComment(card, '/reject too late', 'reviewer');
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       const events = log.read();
       // The second command is still recorded as an audit fact (two
@@ -776,21 +757,255 @@ steps:
       expect(isBotComment(botComment.body)).toBe(true);
       expect(botComment.author).not.toBe('workmachine');
 
-      await tick({
-        workflow,
-        log,
-        executor: scriptExecutor,
-        runDir,
-        now,
-        tracker,
-        ...cursor,
-      });
+      await callTick({ workflow, log, runDir, tracker, ...cursor });
 
       const events = log.read();
       // No command was ingested from the bot's own comment, and the gate stays
       // open and undecided.
       expect(events.some((e) => e.type === 'command_received')).toBe(false);
       expect(events.some((e) => e.type === 'gate_decided')).toBe(false);
+    });
+  });
+
+  describe('executor registry keyed by step type', () => {
+    /** A fake agent executor that records the resolved steps it was handed. */
+    function fakeAgentExecutor(): { executor: Executor; seen: ResolvedStep[] } {
+      const seen: ResolvedStep[] = [];
+      return {
+        seen,
+        executor: {
+          run: (step) => {
+            seen.push(step);
+            return Promise.resolve({ ok: true, artifacts: [] });
+          },
+        },
+      };
+    }
+
+    it('routes an agent step to the agent executor and records the composed prompt + model', async () => {
+      const workflow = loadWorkflow(`
+slug: tiny-smoke
+inputs:
+  topic: {}
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku about {{inputs.topic}}'
+    model: smart-model
+`);
+      const { runDir, log } = seedRun(workflow, [
+        created({ topic: 'pelicans' }),
+      ]);
+      const agent = fakeAgentExecutor();
+
+      await callTick({
+        workflow,
+        log,
+        runDir,
+        executors: { agent: agent.executor },
+      });
+
+      const events = log.read();
+      expect(events.map((e) => e.type)).toEqual([
+        'run_created',
+        'step_dispatched',
+        'step_succeeded',
+        'run_completed',
+      ]);
+
+      // step_dispatched carries the fully composed prompt — the resolved author
+      // text plus the appended engine contract block — and the model.
+      const expectedPrompt = composeAgentPrompt(
+        'Write a haiku about pelicans',
+        [],
+      );
+      const dispatched = events[1];
+      expect(dispatched?.type).toBe('step_dispatched');
+      if (dispatched?.type === 'step_dispatched') {
+        expect(dispatched.stepType).toBe('agent');
+        if (dispatched.stepType === 'agent') {
+          expect(dispatched.prompt).toBe(expectedPrompt);
+          expect(
+            dispatched.prompt.startsWith('Write a haiku about pelicans'),
+          ).toBe(true);
+          expect(dispatched.prompt).toContain('## Engine contract');
+          expect(dispatched.model).toBe('smart-model');
+        }
+      }
+
+      // The agent executor — not the script one — received the resolved step,
+      // with EXACTLY the prompt the log recorded (recorded === sent).
+      expect(agent.seen).toHaveLength(1);
+      expect(agent.seen[0]).toMatchObject({
+        type: 'agent',
+        id: 'draft',
+        prompt: expectedPrompt,
+        model: 'smart-model',
+      });
+    });
+
+    it('lists declared artifact paths in the dispatched contract block', async () => {
+      const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a draft'
+    produces:
+      - id: out
+        path: artifacts/draft.md
+`);
+      const { runDir, log } = seedRun(workflow, [created()]);
+      const agent = fakeAgentExecutor();
+
+      await callTick({
+        workflow,
+        log,
+        runDir,
+        executors: { agent: agent.executor },
+      });
+
+      const dispatched = log.read()[1];
+      expect(dispatched?.type).toBe('step_dispatched');
+      if (
+        dispatched?.type === 'step_dispatched' &&
+        dispatched.stepType === 'agent'
+      ) {
+        expect(dispatched.prompt).toBe(
+          composeAgentPrompt('Write a draft', [
+            { id: 'out', path: 'artifacts/draft.md' },
+          ]),
+        );
+        expect(dispatched.prompt).toContain('artifacts/draft.md');
+      }
+    });
+
+    it('omits model from step_dispatched when the agent step sets none', async () => {
+      const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku'
+`);
+      const { runDir, log } = seedRun(workflow, [created()]);
+      const agent = fakeAgentExecutor();
+
+      await callTick({
+        workflow,
+        log,
+        runDir,
+        executors: { agent: agent.executor },
+      });
+
+      const dispatched = log.read()[1];
+      expect(dispatched?.type).toBe('step_dispatched');
+      if (dispatched?.type === 'step_dispatched') {
+        expect(dispatched.stepType).toBe('agent');
+        expect('model' in dispatched).toBe(false);
+        if (dispatched.stepType === 'agent') {
+          expect(dispatched.prompt).toBe(
+            composeAgentPrompt('Write a haiku', []),
+          );
+        }
+      }
+    });
+
+    it('threads the agent executor summary onto step_succeeded', async () => {
+      const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku'
+`);
+      const { runDir, log } = seedRun(workflow, [created()]);
+      const executor: Executor = {
+        run: () =>
+          Promise.resolve({
+            ok: true,
+            artifacts: [],
+            summary: 'Wrote the haiku.',
+          }),
+      };
+
+      await callTick({ workflow, log, runDir, executors: { agent: executor } });
+
+      const succeeded = log.read().find((e) => e.type === 'step_succeeded');
+      expect(succeeded?.type).toBe('step_succeeded');
+      if (succeeded?.type === 'step_succeeded') {
+        expect(succeeded.summary).toBe('Wrote the haiku.');
+      }
+    });
+
+    it('threads the agent executor summary onto step_failed', async () => {
+      const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku'
+`);
+      const { runDir, log } = seedRun(workflow, [created()]);
+      const executor: Executor = {
+        run: () =>
+          Promise.resolve({
+            ok: false,
+            error: 'codex exited with code 3',
+            summary: 'Got stuck on the second stanza.',
+          }),
+      };
+
+      await callTick({ workflow, log, runDir, executors: { agent: executor } });
+
+      const failed = log.read().find((e) => e.type === 'step_failed');
+      expect(failed?.type).toBe('step_failed');
+      if (failed?.type === 'step_failed') {
+        expect(failed.reason).toBe('codex exited with code 3');
+        expect(failed.summary).toBe('Got stuck on the second stanza.');
+      }
+    });
+
+    it('leaves a script step_succeeded free of agent metadata keys', async () => {
+      const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: greet
+    type: script
+    run: 'printf hi > {{artifacts.out.path}}'
+    produces:
+      - id: out
+        path: artifacts/out.txt
+`);
+      const { runDir, log } = seedRun(workflow, [created()]);
+
+      await callTick({ workflow, log, runDir });
+
+      const succeeded = log.read().find((e) => e.type === 'step_succeeded');
+      expect(succeeded?.type).toBe('step_succeeded');
+      // The script executor returns no agent metadata, so the fields are omitted
+      // entirely (not set to undefined) and the event shape is unchanged.
+      expect(succeeded && 'summary' in succeeded).toBe(false);
+      expect(succeeded && 'sessionRef' in succeeded).toBe(false);
+    });
+
+    it('fails loudly on a step type with no registered executor, appending no dispatch', async () => {
+      const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku'
+`);
+      const { runDir, log } = seedRun(workflow, [created()]);
+
+      // Only the script executor is registered; the agent step has no executor.
+      await expect(callTick({ workflow, log, runDir })).rejects.toThrow(
+        /no executor registered for step type 'agent'/,
+      );
+
+      // The lookup failed BEFORE the append, so no dangling dispatch was left.
+      expect(log.read().some((e) => e.type === 'step_dispatched')).toBe(false);
     });
   });
 });

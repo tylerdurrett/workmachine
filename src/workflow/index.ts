@@ -6,8 +6,15 @@ export {
   TOKEN_RE,
 } from './interpolation.js';
 export { loadWorkflow, loadWorkflowFile } from './loader.js';
-export { isGateStep, isScriptStep, workflowSchema } from './schema.js';
+export {
+  isAgentStep,
+  isGateStep,
+  isScriptStep,
+  isTemplatedStep,
+  workflowSchema,
+} from './schema.js';
 export type {
+  AgentStep,
   GateStep,
   ProducedArtifact,
   ScriptStep,

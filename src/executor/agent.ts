@@ -1,0 +1,413 @@
+import { spawn } from 'node:child_process';
+import { readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { ProducedArtifact } from '../workflow/schema.js';
+import { captureDeclaredArtifacts } from './capture.js';
+import type {
+  Executor,
+  ExecutorResult,
+  ResolvedAgentStep,
+  ResolvedStep,
+  RunContext,
+} from './types.js';
+
+/**
+ * The `agent` executor: runs an agent step by spawning the Codex CLI in
+ * non-interactive mode (`codex exec`) as a subprocess (ADR-0009).
+ *
+ * An agent step hands a resolved prompt to an autonomous harness working in the
+ * run directory; the harness — not the engine — writes the declared artifacts.
+ * Enforcement is deterministic: the engine appends a contract block to every
+ * resolved prompt stating exactly what the harness must (and must not) do, and
+ * after exit verifies each declared `produces` exists. No re-prompt loops.
+ *
+ * The composition happens AT DISPATCH (in the harness tick), so the prompt
+ * recorded on `step_dispatched` is the author text + contract block — the exact
+ * bytes the executor later sends. Replay reads the recorded prompt back from
+ * the log, never re-composes it.
+ */
+
+/**
+ * Append the deterministic engine contract block to a resolved author prompt.
+ *
+ * The block states the step's obligations: write every declared artifact at its
+ * path relative to the run directory, stay inside the run directory, and make
+ * no git commits or pushes. It is a pure function of its inputs — the same
+ * prompt and declarations always compose to the same bytes.
+ *
+ * @param prompt the fully-resolved author prompt (no `{{...}}` tokens remain).
+ * @param produces the artifacts the step declared; paths relative to the run dir.
+ */
+export function composeAgentPrompt(
+  prompt: string,
+  produces: readonly ProducedArtifact[],
+): string {
+  const artifactLines =
+    produces.length === 0
+      ? ['- This step declares no artifact files.']
+      : [
+          '- Before you finish, write every one of these declared artifact files (paths are relative to the run directory):',
+          ...produces.map((artifact) => `  - \`${artifact.path}\``),
+        ];
+
+  return [
+    prompt,
+    '',
+    '---',
+    '',
+    '## Engine contract',
+    '',
+    'You are working inside a workflow run directory (your current working directory).',
+    '',
+    ...artifactLines,
+    '- Stay inside the run directory: do not read or write files outside it.',
+    '- Do not make git commits and do not push to any remote.',
+  ].join('\n');
+}
+
+/**
+ * Hard wall-clock timeout for one agent invocation. Generous on purpose — an
+ * agent step legitimately runs for many minutes — but a hard ceiling so a hung
+ * subprocess is killed and recorded as `step_failed` rather than wedging the
+ * tick forever. A constant, deliberately not schema-exposed (ADR-0009);
+ * per-step tuning is a policy decision the workflow schema does not offer.
+ */
+export const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * File codex writes its final agent message into via `--output-last-message`
+ * (ADR-0009). It lives inside the run dir so the `--sandbox workspace-write`
+ * root (pinned by `-C runDir`) can write it, and is dot-prefixed and NOT a
+ * declared `produces` artifact so {@link captureDeclaredArtifacts} never treats
+ * it as run output. The executor clears any stale copy before each spawn and
+ * reads it back after the child closes, on both success and failure.
+ */
+export const LAST_MESSAGE_FILE = '.codex-last-message.txt';
+
+/**
+ * How many trailing bytes of codex's stderr to keep for failure diagnostics. A
+ * hung or crashing run can emit far more than is useful, so the executor holds
+ * only this bounded tail (the end, where the fatal error usually is) and appends
+ * it to the `step_failed` reason. Distinct from the `summary` last-message
+ * capture: that is the agent's own final words; this is the raw error channel.
+ */
+export const STDERR_TAIL_MAX_BYTES = 4 * 1024;
+
+/**
+ * The slice of a spawned child the agent executor needs: its process id (to
+ * signal the whole process group on timeout), kill, and the `error` / `close`
+ * lifecycle events. `node:child_process`'s `ChildProcess` satisfies it
+ * structurally; tests substitute a fake.
+ */
+export interface AgentChild {
+  /**
+   * The child's OS process id, or `undefined` before it has been assigned. Also
+   * the id of the child's process group (it is spawned `detached`, so it leads
+   * its own group), which the timeout kill signals via a negative pid.
+   */
+  pid?: number | undefined;
+  /**
+   * The child's stderr, piped so a failure can carry a bounded tail of it. Null
+   * when the stream was not piped; each `data` event is a chunk of raw bytes.
+   * The `error` event (e.g. EPIPE / premature destroy) must have a listener or
+   * Node throws it as an uncaught exception, escaping the never-throws seam.
+   */
+  stderr: {
+    on(event: 'data', listener: (chunk: Buffer) => void): unknown;
+    on(event: 'error', listener: (err: Error) => void): unknown;
+  } | null;
+  /** Deliver a signal to the child alone (the fallback when `pid` is absent). */
+  kill(signal: NodeJS.Signals): boolean;
+  /** The child failed to spawn. */
+  on(event: 'error', listener: (err: Error) => void): unknown;
+  /** The child exited: a code XOR a terminating signal. */
+  on(
+    event: 'close',
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): unknown;
+}
+
+/**
+ * Spawn-function seam: unit tests inject a fake so they never touch a real
+ * `codex` binary; production defaults to `node:child_process`'s `spawn`. The
+ * child is spawned `detached` so it leads its own process group, and the
+ * timeout's `-pid` kill directly reaps only what stays in that group: codex's
+ * launcher, its rust core, and the git repo-check helpers. Codex `setsid`s its
+ * sandbox subtree (the `codex-linux-sandbox` layers and the tool command it
+ * wraps) into separate sessions our signal can't reach; those die via
+ * codex-linux-sandbox's parent-death cascade once we kill the in-group core.
+ * So the group-kill is necessary — killing only the direct child leaves the
+ * core alive and nothing cascades — but not self-sufficient; cascade-independent
+ * hardening is tracked in #87. Stderr is piped so a failure can carry a bounded
+ * tail of it (stdin/stdout stay ignored).
+ */
+export type AgentSpawn = (
+  command: string,
+  args: readonly string[],
+  options: { stdio: ['ignore', 'ignore', 'pipe']; detached: boolean },
+) => AgentChild;
+
+/**
+ * Deliver a signal to a whole process group (a negative pid). Production uses
+ * `process.kill`; tests inject a fake to assert the group-kill without a real
+ * process group.
+ */
+export type KillGroup = (pid: number, signal: NodeJS.Signals) => void;
+
+/** Injection points for {@link createAgentExecutor}; tests only. */
+export interface AgentExecutorOptions {
+  /** Spawn substitute; defaults to the real `node:child_process` spawn. */
+  spawnFn?: AgentSpawn;
+  /** Timeout override; the production default is {@link AGENT_TIMEOUT_MS}. */
+  timeoutMs?: number;
+  /** Group-kill substitute; defaults to `process.kill`. */
+  killGroupFn?: KillGroup;
+}
+
+/**
+ * Build an `agent` executor over an injectable spawn function and timeout.
+ *
+ * Outcomes (always values, never thrown — the executor seam contract):
+ * - `codex` exits zero and every declared artifact exists → `{ ok: true,
+ *   artifacts }` with each artifact's path/sha256/size.
+ * - non-zero exit, spawn failure, terminating signal, or the wall-clock
+ *   timeout killing a hung child → `{ ok: false, error }` → `step_failed`.
+ * - zero exit but a declared artifact missing → `{ ok: false, error }`: the
+ *   same deterministic enforcement scripts obey, with no re-prompt loop.
+ * - a non-`agent` resolved step → `{ ok: false, error }` without spawning.
+ */
+export function createAgentExecutor(
+  options: AgentExecutorOptions = {},
+): Executor {
+  const spawnFn = options.spawnFn ?? spawn;
+  const timeoutMs = options.timeoutMs ?? AGENT_TIMEOUT_MS;
+  const killGroupFn =
+    options.killGroupFn ?? ((pid, signal) => void process.kill(pid, signal));
+
+  return {
+    async run(step: ResolvedStep, ctx: RunContext): Promise<ExecutorResult> {
+      if (step.type !== 'agent') {
+        return {
+          ok: false,
+          error: `agent executor cannot run '${step.type}' step "${step.id}"`,
+        };
+      }
+
+      const lastMessageFile = join(ctx.runDir, LAST_MESSAGE_FILE);
+      // Clear any final message left by a prior attempt so a spawn failure can
+      // never attach a stale summary — after the child closes, a file present
+      // here was written by this invocation. `force` swallows a missing file,
+      // but a locked/unreadable one (EACCES/EPERM/EBUSY) still rejects; contain
+      // that as a failure value so the seam never throws before a child exists
+      // to resolve it (and never risks attaching the un-cleared stale summary).
+      try {
+        await rm(lastMessageFile, { force: true });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          error: `could not clear stale last-message file: ${reason}`,
+        };
+      }
+
+      const exit = await runCodex(
+        spawnFn,
+        killGroupFn,
+        step,
+        ctx.runDir,
+        lastMessageFile,
+        timeoutMs,
+      );
+      // Read the final message on BOTH outcomes: a failed agent step can still
+      // have written one before exiting non-zero.
+      const summary = await readLastMessage(lastMessageFile);
+
+      if (!exit.ok) {
+        return withSummary({ ok: false, error: exit.error }, summary);
+      }
+
+      const captured = await captureDeclaredArtifacts(
+        step.produces,
+        ctx.runDir,
+      );
+      return withSummary(captured, summary);
+    },
+  };
+}
+
+/** The production `agent` executor: real spawn, hardcoded generous timeout. */
+export const agentExecutor: Executor = createAgentExecutor();
+
+/** Result of the codex subprocess: an ok/fail verdict with a reason on failure. */
+type CodexResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Spawn `codex exec` for the step and wait for it to settle. The flag surface
+ * (verified against codex v0.137.0, ADR-0009): `-C <runDir>` pins the working
+ * root to the run dir, `--sandbox workspace-write` bounds the blast radius,
+ * `--skip-git-repo-check` because a run dir is not a git repo, `--json` selects
+ * JSONL event output (its stdout is ignored; sourcing `sessionRef` from it stays
+ * out of scope), `-o <lastMessageFile>` captures the agent's final message into a
+ * file the executor reads back as `summary`, `-m <model>` only when the step sets
+ * one, and the already-composed prompt as the final argument — exactly the bytes
+ * recorded on `step_dispatched`. Stderr is piped so a failure can carry a bounded
+ * tail of it ({@link STDERR_TAIL_MAX_BYTES}).
+ *
+ * A wall-clock timer SIGKILLs a hung child's whole process group (the child is
+ * spawned `detached`, so it leads its own group); the `-pid` signal directly
+ * reaps the in-group members (launcher, rust core, git helpers) — codex's
+ * setsid'd sandbox subtree then dies via its own parent-death cascade once the
+ * core is gone (#87). The kill surfaces as a timeout failure, not a bare signal
+ * exit. Never rejects: a spawn error, a signal, a non-zero exit, and a timeout
+ * all resolve as `{ ok: false }` values; the last three carry the stderr tail.
+ */
+function runCodex(
+  spawnFn: AgentSpawn,
+  killGroupFn: KillGroup,
+  step: ResolvedAgentStep,
+  runDir: string,
+  lastMessageFile: string,
+  timeoutMs: number,
+): Promise<CodexResult> {
+  const args = [
+    'exec',
+    '-C',
+    runDir,
+    '--sandbox',
+    'workspace-write',
+    '--skip-git-repo-check',
+    '--json',
+    '-o',
+    lastMessageFile,
+    ...(step.model !== undefined ? ['-m', step.model] : []),
+    step.prompt,
+  ];
+
+  return new Promise((resolvePromise) => {
+    const child = spawnFn('codex', args, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      detached: true,
+    });
+
+    // Keep only the trailing STDERR_TAIL_MAX_BYTES of stderr: the fatal error is
+    // near the end, and an unbounded buffer would be a leak on a chatty run.
+    // (Piping stderr couples us to the group-kill: a surviving child holding
+    // this fd open would stall `close` — see the timeout handler below.)
+    let stderrTail = Buffer.alloc(0);
+    child.stderr?.on('data', (chunk) => {
+      stderrTail = Buffer.concat([stderrTail, chunk]);
+      if (stderrTail.byteLength > STDERR_TAIL_MAX_BYTES) {
+        stderrTail = stderrTail.subarray(
+          stderrTail.byteLength - STDERR_TAIL_MAX_BYTES,
+        );
+      }
+    });
+    // A stderr stream `error` (EPIPE / premature destroy) with no listener makes
+    // Node throw, escaping the never-throws seam. Swallow it: the child's
+    // `close`/`error` handler still resolves the step, carrying whatever tail was
+    // buffered before the stream broke.
+    child.stderr?.on('error', () => {});
+    // Append the captured stderr tail to a failure reason, clearly delimited;
+    // a no-op when codex wrote nothing to stderr.
+    const withStderrTail = (error: string): string => {
+      const tail = stderrTail.toString('utf8').trim();
+      return tail === ''
+        ? error
+        : `${error}\n--- codex stderr (last ${STDERR_TAIL_MAX_BYTES} bytes) ---\n${tail}`;
+    };
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // Kill the whole process group, not just the direct child. A negative pid
+      // signals the group (child is the detached group leader); this directly
+      // reaps the in-group members — codex's launcher, rust core, and git
+      // repo-check helpers. Codex `setsid`s its sandbox subtree out of the
+      // group, so our signal never reaches it directly; that subtree dies via
+      // codex-linux-sandbox's parent-death cascade once we've killed the
+      // in-group core (cascade-independent hardening: #87). Killing only the
+      // direct child leaves the core alive and nothing cascades. Fall back to a
+      // direct kill only if the pid never landed.
+      //
+      // Load-bearing for the timeout path to RESOLVE, not just orphan hygiene:
+      // because we pipe stderr for the failure tail, a surviving descendant
+      // inherits and holds that stderr fd open, so Node's `close` never fires
+      // and this Promise never settles. Reverting to a direct-child kill would
+      // reintroduce a HANG here (the core survives, its cascade never fires),
+      // not merely leak orphans.
+      //
+      // Best-effort, so it MUST NOT throw: `process.kill` throws synchronously
+      // (ESRCH/EPERM) if the group already exited before the timer fired — and
+      // in a timer callback that throw would be uncaught, crashing the harness.
+      // Swallow it; Node still delivers `close`, which resolves the step.
+      try {
+        const { pid } = child;
+        if (pid === undefined) {
+          child.kill('SIGKILL');
+        } else {
+          killGroupFn(-pid, 'SIGKILL');
+        }
+      } catch {
+        // best-effort reap; resolution comes from the child's `close`/`exit`.
+      }
+    }, timeoutMs);
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolvePromise({
+        ok: false,
+        error: `codex failed to start: ${err.message}`,
+      });
+    });
+
+    // Resolve a close-path failure with the stderr tail appended to its reason.
+    const fail = (reason: string): void =>
+      resolvePromise({ ok: false, error: withStderrTail(reason) });
+
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        fail(`codex timed out after ${timeoutMs}ms and was killed`);
+        return;
+      }
+      if (signal !== null) {
+        fail(`codex terminated by signal ${signal}`);
+        return;
+      }
+      if (code !== 0) {
+        fail(`codex exited with code ${code}`);
+        return;
+      }
+      resolvePromise({ ok: true });
+    });
+  });
+}
+
+/**
+ * Read codex's `--output-last-message` file back as the agent's `summary`.
+ * Returns `undefined` when the file is absent (codex wrote none) or empty, so
+ * the field is omitted rather than set to an empty string. Surrounding
+ * whitespace is trimmed; a missing file is an expected outcome, never an error.
+ */
+async function readLastMessage(
+  lastMessageFile: string,
+): Promise<string | undefined> {
+  try {
+    const message = (await readFile(lastMessageFile, 'utf8')).trim();
+    return message === '' ? undefined : message;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Merge a captured `summary` onto an {@link ExecutorResult} without setting the
+ * key to `undefined` (which `exactOptionalPropertyTypes` forbids). Preserves the
+ * result's `ok` discriminant and its success/failure payload.
+ */
+function withSummary(
+  result: ExecutorResult,
+  summary: string | undefined,
+): ExecutorResult {
+  return summary === undefined ? result : { ...result, summary };
+}

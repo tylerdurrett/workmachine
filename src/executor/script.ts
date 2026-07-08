@@ -1,9 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
-import { resolve } from 'node:path';
-import type { ArtifactIndexEntry } from '../domain/artifacts.js';
+import { captureDeclaredArtifacts } from './capture.js';
 import type {
   Executor,
   ExecutorResult,
@@ -12,9 +8,9 @@ import type {
 } from './types.js';
 
 /**
- * The `script` executor: the first (and, in the gateless slice, only) executor
- * adapter. It runs a step's already-resolved command and captures the artifacts
- * the step declared it `produces`.
+ * The `script` executor: the first executor adapter. It runs a step's
+ * already-resolved command and captures the artifacts the step declared it
+ * `produces`.
  *
  * This is the determinism boundary's only side-effecting layer (CONTEXT.md):
  * it spawns a shell, lets the command write files into the run directory, then
@@ -27,29 +23,25 @@ import type {
  *   artifacts }`, mapped by the harness to `step_succeeded`.
  * - command exits non-zero, or fails to spawn, or a declared artifact is
  *   missing afterward → `{ ok: false, error }`, mapped to `step_failed`.
+ * - a non-`script` resolved step → `{ ok: false, error }` without running
+ *   anything: this adapter only knows how to run shell commands, and an
+ *   executor's outcome is always a value, never a thrown error.
  */
 export const scriptExecutor: Executor = {
   async run(step: ResolvedStep, ctx: RunContext): Promise<ExecutorResult> {
+    if (step.type !== 'script') {
+      return {
+        ok: false,
+        error: `script executor cannot run '${step.type}' step "${step.id}"`,
+      };
+    }
+
     const exit = await runCommand(step.command, ctx.runDir);
     if (!exit.ok) {
       return { ok: false, error: exit.error };
     }
 
-    const artifacts: ArtifactIndexEntry[] = [];
-    for (const declared of step.produces) {
-      const absolutePath = resolve(ctx.runDir, declared.path);
-      const captured = await captureArtifact(
-        declared.id,
-        declared.path,
-        absolutePath,
-      );
-      if (!captured.ok) {
-        return { ok: false, error: captured.error };
-      }
-      artifacts.push(captured.entry);
-    }
-
-    return { ok: true, artifacts };
+    return captureDeclaredArtifacts(step.produces, ctx.runDir);
   },
 };
 
@@ -94,53 +86,5 @@ function runCommand(command: string, cwd: string): Promise<CommandResult> {
       }
       resolvePromise({ ok: true });
     });
-  });
-}
-
-/** Result of capturing one declared artifact from disk. */
-type CaptureResult =
-  | { ok: true; entry: ArtifactIndexEntry }
-  | { ok: false; error: string };
-
-/**
- * Stat and SHA-256 the file a declared artifact points at, building its
- * {@link ArtifactIndexEntry}. A missing file (or any read error) is a failure —
- * the contract is that a declared `produces` artifact must exist after a
- * successful run.
- */
-async function captureArtifact(
-  id: string,
-  path: string,
-  absolutePath: string,
-): Promise<CaptureResult> {
-  let size: number;
-  try {
-    const stats = await stat(absolutePath);
-    if (!stats.isFile()) {
-      return {
-        ok: false,
-        error: `declared artifact "${id}" at "${path}" is not a file`,
-      };
-    }
-    size = stats.size;
-  } catch {
-    return {
-      ok: false,
-      error: `declared artifact "${id}" missing at "${path}"`,
-    };
-  }
-
-  const sha256 = await hashFile(absolutePath);
-  return { ok: true, entry: { id, path, sha256, size } };
-}
-
-/** Compute the SHA-256 hex digest of a file by streaming its bytes. */
-function hashFile(absolutePath: string): Promise<string> {
-  return new Promise((resolvePromise, reject) => {
-    const hash = createHash('sha256');
-    const stream = createReadStream(absolutePath);
-    stream.on('error', reject);
-    stream.on('data', (chunk) => hash.update(chunk));
-    stream.on('end', () => resolvePromise(hash.digest('hex')));
   });
 }

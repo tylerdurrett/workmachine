@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { loadWorkflow } from './loader.js';
-import { isGateStep, isScriptStep } from './schema.js';
+import { isAgentStep, isGateStep, isScriptStep } from './schema.js';
 
 const validYaml = `
 slug: tiny-smoke
@@ -138,6 +138,67 @@ steps:
     ).toThrow(z.ZodError);
   });
 
+  it('accepts an agent step with a prompt, produces, and an optional model', () => {
+    const def = loadWorkflow(`
+slug: agentic
+inputs:
+  topic:
+    type: string
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write about {{inputs.topic}} into {{artifacts.draft.path}}'
+    model: gpt-5
+    produces:
+      - id: draft
+        path: artifacts/draft.md
+`);
+    const step = def.steps[0];
+    expect(step && isAgentStep(step)).toBe(true);
+    expect(step && isAgentStep(step) && step.model).toBe('gpt-5');
+    expect(step && isAgentStep(step) && step.produces).toEqual([
+      { id: 'draft', path: 'artifacts/draft.md' },
+    ]);
+  });
+
+  it('accepts an agent step without a model (model is optional)', () => {
+    const def = loadWorkflow(`
+slug: agentic
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku'
+`);
+    const step = def.steps[0];
+    expect(step && isAgentStep(step) && step.model).toBeUndefined();
+    expect(step?.needs).toEqual([]);
+  });
+
+  it('rejects an agent step carrying an unknown key via .strict()', () => {
+    expect(() =>
+      loadWorkflow(`
+slug: x
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku'
+    run: echo hi
+`),
+    ).toThrow(z.ZodError);
+  });
+
+  it('rejects an agent step with an empty prompt', () => {
+    expect(() =>
+      loadWorkflow(`
+slug: x
+steps:
+  - id: draft
+    type: agent
+    prompt: ''
+`),
+    ).toThrow(z.ZodError);
+  });
+
   it('rejects a gate step with an empty allowed_decisions list', () => {
     expect(() =>
       loadWorkflow(`
@@ -148,5 +209,99 @@ steps:
     allowed_decisions: []
 `),
     ).toThrow(z.ZodError);
+  });
+
+  it('accepts a valid retries value on script and agent steps', () => {
+    const def = loadWorkflow(`
+slug: retrying
+steps:
+  - id: build
+    type: script
+    run: echo hi
+    retries: 2
+  - id: draft
+    type: agent
+    prompt: 'Write a haiku'
+    retries: 3
+`);
+    const script = def.steps[0];
+    const agent = def.steps[1];
+    expect(script && isScriptStep(script) && script.retries).toBe(2);
+    expect(agent && isAgentStep(agent) && agent.retries).toBe(3);
+  });
+
+  it('defaults retries to 0 when omitted, identical to an explicit 0', () => {
+    const omitted = loadWorkflow(`
+slug: omitted
+steps:
+  - id: build
+    type: script
+    run: echo hi
+`);
+    const explicit = loadWorkflow(`
+slug: explicit
+steps:
+  - id: build
+    type: script
+    run: echo hi
+    retries: 0
+`);
+    const omittedStep = omitted.steps[0];
+    const explicitStep = explicit.steps[0];
+    expect(
+      omittedStep && isScriptStep(omittedStep) && omittedStep.retries,
+    ).toBe(0);
+    expect(
+      explicitStep && isScriptStep(explicitStep) && explicitStep.retries,
+    ).toBe(0);
+    // Omitted and explicit-0 parse to identical step values.
+    expect(omittedStep && { ...omittedStep, id: 'x' }).toEqual(
+      explicitStep && { ...explicitStep, id: 'x' },
+    );
+  });
+
+  it('rejects a negative retries value', () => {
+    expect(() =>
+      loadWorkflow(`
+slug: x
+steps:
+  - id: build
+    type: script
+    run: echo hi
+    retries: -1
+`),
+    ).toThrow(z.ZodError);
+  });
+
+  it('rejects a non-integer retries value', () => {
+    expect(() =>
+      loadWorkflow(`
+slug: x
+steps:
+  - id: build
+    type: script
+    run: echo hi
+    retries: 1.5
+`),
+    ).toThrow(z.ZodError);
+  });
+
+  it('rejects a gate step carrying retries (unrecognized_keys)', () => {
+    try {
+      loadWorkflow(`
+slug: x
+steps:
+  - id: review
+    type: gate
+    allowed_decisions: [approve]
+    retries: 1
+`);
+      throw new Error('expected a ZodError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(z.ZodError);
+      expect(
+        (err as z.ZodError).issues.some((i) => i.code === 'unrecognized_keys'),
+      ).toBe(true);
+    }
   });
 });

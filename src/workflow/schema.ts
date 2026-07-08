@@ -6,19 +6,22 @@ import type { GateDecision } from '../domain/events.js';
  * Zod schema and inferred types for a `workflow.yaml` definition.
  *
  * A workflow package declares its inputs and an ordered list of steps — a
- * `script` step runs a templated command and may `produce` named artifacts; a
+ * `script` step runs a templated command and may `produce` named artifacts; an
+ * `agent` step runs a templated prompt and may `produce` named artifacts; a
  * `gate` (review) step is a wait state declaring its `allowed_decisions`. The
  * loader (see `loader.ts`) parses YAML into this shape and Zod-validates it; the
  * resolver (#11) later substitutes `{{...}}` tokens per dispatch. This schema is
  * purely structural — interpolation-reference and DAG checks live in their own
  * modules so each concern surfaces a precise, focused error.
  *
- * Two step kinds exist (CONTEXT.md → Gate): a `script` step runs a templated
- * command and may `produce` artifacts; a `gate` step is a **review step** — a
- * coordinator-owned wait state that declares the `allowed_decisions` a reviewer
- * may hand it. `type` discriminates the two. A `script`-only workflow parses
- * exactly as before. Every object is `.strict()` so a typo'd or unknown key
- * surfaces as a schema violation rather than being silently dropped.
+ * Three step kinds exist (CONTEXT.md → Gate): a `script` step runs a templated
+ * command and may `produce` artifacts; an `agent` step runs a templated prompt
+ * through an agent invocation and may `produce` artifacts; a `gate` step is a
+ * **review step** — a coordinator-owned wait state that declares the
+ * `allowed_decisions` a reviewer may hand it. `type` discriminates the three. A
+ * `script`-only workflow parses exactly as before. Every object is `.strict()`
+ * so a typo'd or unknown key surfaces as a schema violation rather than being
+ * silently dropped.
  *
  * This schema accepts the gate *shape* only; revision feedback threading
  * (`{{feedback.*}}`) stays rejected by the loader's interpolation pass — that is
@@ -68,6 +71,14 @@ const gateDecisionSchema = z.enum([
 ]) satisfies z.ZodType<GateDecision>;
 
 /**
+ * Number of automatic retries a dispatchable step (`script` or `agent`) permits
+ * before it is considered failed; a non-negative integer defaulting to `0`. A
+ * default of `0` preserves current behavior exactly — this is a pure
+ * declaration, no runtime retry logic reads it yet (a later `decide` fold does).
+ */
+const retriesSchema = z.number().int().min(0).default(0);
+
+/**
  * A single `script` step: a templated command plus optional explicit
  * dependencies and produced artifacts.
  */
@@ -83,6 +94,31 @@ const scriptStepSchema = z
     needs: z.array(z.string()).default([]),
     /** Artifacts this step produces; defaults to none. */
     produces: z.array(producedArtifactSchema).default([]),
+    /** Automatic retries permitted before failure; non-negative int, defaults to 0. */
+    retries: retriesSchema,
+  })
+  .strict();
+
+/**
+ * A single `agent` step: a templated prompt run through an agent invocation,
+ * plus optional explicit dependencies, produced artifacts, and model override.
+ */
+const agentStepSchema = z
+  .object({
+    /** Stable, non-empty id for the step within the workflow. */
+    id: z.string().min(1),
+    /** Step kind discriminant. */
+    type: z.literal('agent'),
+    /** Templated prompt to run; may contain `{{inputs.*}}`/`{{artifacts.*.path}}`. */
+    prompt: z.string().min(1),
+    /** Explicit step-id dependencies; defaults to none. */
+    needs: z.array(z.string()).default([]),
+    /** Artifacts this step produces; defaults to none. */
+    produces: z.array(producedArtifactSchema).default([]),
+    /** Optional model override for the agent invocation. */
+    model: z.string().min(1).optional(),
+    /** Automatic retries permitted before failure; non-negative int, defaults to 0. */
+    retries: retriesSchema,
   })
   .strict();
 
@@ -105,11 +141,12 @@ const gateStepSchema = z
   .strict();
 
 /**
- * A single step: either a `script` step or a `gate` (review) step, discriminated
- * by `type`.
+ * A single step: a `script` step, an `agent` step, or a `gate` (review) step,
+ * discriminated by `type`.
  */
 const workflowStepSchema = z.discriminatedUnion('type', [
   scriptStepSchema,
+  agentStepSchema,
   gateStepSchema,
 ]);
 
@@ -132,11 +169,15 @@ export const workflowSchema = z
 /**
  * Narrow a {@link WorkflowStep} to a `script` step. Loader passes that reason
  * about commands and artifacts (interpolation, DAG wiring) and the harness's
- * resolver/executor operate only on script steps; gate steps carry no `run` or
- * `produces`.
+ * resolver/executor narrow on this; gate steps carry no `run` or `produces`.
  */
 export function isScriptStep(step: WorkflowStep): step is ScriptStep {
   return step.type === 'script';
+}
+
+/** Narrow a {@link WorkflowStep} to an `agent` step. */
+export function isAgentStep(step: WorkflowStep): step is AgentStep {
+  return step.type === 'agent';
 }
 
 /** Narrow a {@link WorkflowStep} to a `gate` (review) step. */
@@ -144,12 +185,27 @@ export function isGateStep(step: WorkflowStep): step is GateStep {
   return step.type === 'gate';
 }
 
+/**
+ * Narrow a {@link WorkflowStep} to a produces-bearing / templated step — a
+ * `script` or `agent` step. These are the kinds that carry interpolatable text
+ * and may `produce` artifacts; gate steps carry neither. Passes that reason over
+ * commands/prompts and artifact wiring (interpolation, DAG, resolver) narrow on
+ * this rather than hand-rolling the `script || agent` disjunction.
+ */
+export function isTemplatedStep(
+  step: WorkflowStep,
+): step is ScriptStep | AgentStep {
+  return isScriptStep(step) || isAgentStep(step);
+}
+
 /** A fully-parsed, validated workflow definition. */
 export type WorkflowDefinition = z.infer<typeof workflowSchema>;
-/** A single validated step within a {@link WorkflowDefinition} (script or gate). */
+/** A single validated step within a {@link WorkflowDefinition} (script, agent, or gate). */
 export type WorkflowStep = z.infer<typeof workflowStepSchema>;
 /** A validated `script` step within a {@link WorkflowDefinition}. */
 export type ScriptStep = z.infer<typeof scriptStepSchema>;
+/** A validated `agent` step within a {@link WorkflowDefinition}. */
+export type AgentStep = z.infer<typeof agentStepSchema>;
 /** A validated `gate` (review) step within a {@link WorkflowDefinition}. */
 export type GateStep = z.infer<typeof gateStepSchema>;
 /** A single validated input declaration within a {@link WorkflowDefinition}. */

@@ -15,16 +15,12 @@ import type { ProducedArtifact } from '../workflow/schema.js';
  */
 
 /**
- * A step whose command has already been resolved by the harness resolver (#11):
- * every `{{inputs.*}}` / `{{artifacts.*.path}}` token has been substituted, so
- * `command` is a literal shell string the executor can run as-is. The executor
- * never performs interpolation itself.
+ * Fields every resolved step variant shares, regardless of kind: the step's
+ * identity and the artifacts it promised to produce.
  */
-export interface ResolvedStep {
+interface ResolvedStepBase {
   /** Id of the step being executed. */
   id: string;
-  /** The fully-resolved command to run (no `{{...}}` tokens remain). */
-  command: string;
   /**
    * Artifacts this step declared it produces. Each is captured into a full
    * {@link ArtifactIndexEntry} after the run; a declared artifact missing on
@@ -32,6 +28,42 @@ export interface ResolvedStep {
    */
   produces: ProducedArtifact[];
 }
+
+/**
+ * A `script` step whose command has already been resolved by the harness
+ * resolver (#11): every `{{inputs.*}}` / `{{artifacts.*.path}}` /
+ * `{{feedback.*}}` token has been substituted, so `command` is a literal shell
+ * string the executor can run as-is.
+ */
+export interface ResolvedScriptStep extends ResolvedStepBase {
+  /** Step kind discriminant, mirroring the workflow schema's. */
+  type: 'script';
+  /** The fully-resolved command to run (no `{{...}}` tokens remain). */
+  command: string;
+}
+
+/**
+ * An `agent` step whose prompt has already been resolved by the harness
+ * resolver: every `{{...}}` token has been substituted through the same grammar
+ * as a script command, so `prompt` is the literal author prompt the agent
+ * invocation receives as-is.
+ */
+export interface ResolvedAgentStep extends ResolvedStepBase {
+  /** Step kind discriminant, mirroring the workflow schema's. */
+  type: 'agent';
+  /** The fully-resolved prompt to run (no `{{...}}` tokens remain). */
+  prompt: string;
+  /** Optional model override for the agent invocation, passed through verbatim. */
+  model?: string;
+}
+
+/**
+ * A step the harness resolver has fully substituted, discriminated by `type`
+ * exactly like the workflow schema's executable step kinds. The executor never
+ * performs interpolation itself; each executor adapter narrows to the variant
+ * it knows how to run.
+ */
+export type ResolvedStep = ResolvedScriptStep | ResolvedAgentStep;
 
 /**
  * Ambient context an executor needs to do its work. Held minimal on purpose:
@@ -48,10 +80,25 @@ export interface RunContext {
  * The result of executing a step. A success carries the captured artifact index
  * entries (mapped to `step_succeeded`); a failure carries a human-readable
  * reason (mapped to `step_failed`).
+ *
+ * Both variants may also carry agent metadata the harness threads onto the
+ * terminal step event (ADR-0009):
+ *  - `summary` — the agent's final message, captured from codex's
+ *    `--output-last-message` file on either outcome; a script executor never
+ *    sets it, so it stays omitted (not `undefined`) under
+ *    `exactOptionalPropertyTypes`.
+ *  - `sessionRef` — an opaque session reference, plumbed-but-unpopulated: its
+ *    only cheap source (codex's `--json` stream) is discarded, so no executor
+ *    sets it yet.
  */
 export type ExecutorResult =
-  | { ok: true; artifacts: ArtifactIndexEntry[] }
-  | { ok: false; error: string };
+  | {
+      ok: true;
+      artifacts: ArtifactIndexEntry[];
+      summary?: string;
+      sessionRef?: string;
+    }
+  | { ok: false; error: string; summary?: string; sessionRef?: string };
 
 /** The executor interface. One method, behind which all side effects live. */
 export interface Executor {

@@ -94,16 +94,42 @@ export interface CardCreatedEvent extends EventEnvelope {
 }
 
 /**
- * A step was dispatched to its executor. The resolver records the
- * fully-resolved command here so the log is self-describing on replay.
+ * Fields shared by every `step_dispatched` variant. The resolver records the
+ * fully-resolved payload (per step kind) so the log is self-describing on
+ * replay: the bytes that ran are read back from the log, never re-resolved.
  */
-export interface StepDispatchedEvent extends EventEnvelope {
+interface StepDispatchedBase extends EventEnvelope {
   type: 'step_dispatched';
   /** Id of the step being dispatched. */
   stepId: string;
+  /** Kind of the dispatched step; discriminates the resolved payload shape. */
+  stepType: 'script' | 'agent';
+}
+
+/** A `script` step was dispatched: records its fully-resolved command. */
+export interface ScriptStepDispatchedEvent extends StepDispatchedBase {
+  stepType: 'script';
   /** The fully-resolved command the executor runs (no `{{...}}` left). */
   command: string;
 }
+
+/** An `agent` step was dispatched: records its fully-resolved prompt. */
+export interface AgentStepDispatchedEvent extends StepDispatchedBase {
+  stepType: 'agent';
+  /** The fully-resolved prompt the agent invocation receives (no `{{...}}` left). */
+  prompt: string;
+  /** Optional model override for the agent invocation, recorded verbatim. */
+  model?: string;
+}
+
+/**
+ * A step was dispatched to its executor, discriminated by `stepType`. Each
+ * variant carries the resolved payload for its kind — `command` for script
+ * steps, `prompt` (+ optional `model`) for agent steps.
+ */
+export type StepDispatchedEvent =
+  | ScriptStepDispatchedEvent
+  | AgentStepDispatchedEvent;
 
 /** A step finished successfully, producing zero or more artifacts. */
 export interface StepSucceededEvent extends EventEnvelope {
@@ -112,6 +138,21 @@ export interface StepSucceededEvent extends EventEnvelope {
   stepId: string;
   /** Artifacts the step produced, by index entry. */
   artifacts: ArtifactIndexEntry[];
+  /**
+   * The agent's final message, when the executor captured one (ADR-0009). Only
+   * agent steps ever set it — the executor reads it from codex's
+   * `--output-last-message` file; script steps never carry a `summary`, so the
+   * field stays omitted (not `undefined`) under `exactOptionalPropertyTypes`.
+   */
+  summary?: string;
+  /**
+   * An opaque reference to the agent's session, recorded when the executor can
+   * supply one cheaply (ADR-0009). Plumbed-but-unpopulated for now: codex's
+   * `--json` event stream — the only cheap source — is discarded, so no executor
+   * sets it yet. Present in the shape so consumers can thread it once a source
+   * exists.
+   */
+  sessionRef?: string;
 }
 
 /** A step failed. */
@@ -121,6 +162,18 @@ export interface StepFailedEvent extends EventEnvelope {
   stepId: string;
   /** Human-readable failure reason. */
   reason: string;
+  /**
+   * The agent's final message, when the executor captured one before failing
+   * (ADR-0009). A failed agent step can still leave a final message on disk, so
+   * the field is optional here too; script steps never set it.
+   */
+  summary?: string;
+  /**
+   * An opaque reference to the agent's session, when cheaply available
+   * (ADR-0009). Plumbed-but-unpopulated for now — see
+   * {@link StepSucceededEvent.sessionRef}.
+   */
+  sessionRef?: string;
 }
 
 /** Terminal success for the whole run. */

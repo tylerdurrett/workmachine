@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +7,7 @@ import { parse as parseYaml } from 'yaml';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CliDeps } from './cli/index.js';
 import { main } from './cli/index.js';
+import { composeAgentPrompt } from './executor/index.js';
 import { foldRunState } from './orchestrator/index.js';
 import { JsonlEventLog, foldRun, resolveRunDir } from './run/index.js';
 import { FakeTracker } from './tracker/index.js';
@@ -113,7 +114,10 @@ describe('integration smoke: gateless spine (create -> tick -> completed)', () =
     // The dispatched command is fully resolved — no tokens, real artifact path.
     const dispatched = events[2];
     expect(dispatched?.type).toBe('step_dispatched');
-    if (dispatched?.type === 'step_dispatched') {
+    if (
+      dispatched?.type === 'step_dispatched' &&
+      dispatched.stepType === 'script'
+    ) {
       expect(dispatched.command).not.toMatch(/\{\{/);
       expect(dispatched.command).toContain('artifacts/greeting.txt');
     }
@@ -485,7 +489,10 @@ describe('integration smoke: feedback loop (request_changes -> tick -> approve -
     // and the greeting carries no revision line.
     const firstDispatch = log.read().find((e) => e.type === 'step_dispatched');
     expect(firstDispatch?.type).toBe('step_dispatched');
-    if (firstDispatch?.type === 'step_dispatched') {
+    if (
+      firstDispatch?.type === 'step_dispatched' &&
+      firstDispatch.stepType === 'script'
+    ) {
       expect(firstDispatch.command).not.toMatch(/\{\{/);
       expect(firstDispatch.command).toContain(`"${feedbackScriptPath}"`);
       // The trailing feedback arg is empty on the first round.
@@ -532,12 +539,16 @@ describe('integration smoke: feedback loop (request_changes -> tick -> approve -
     );
     expect(dispatches).toHaveLength(2);
     const redispatch = dispatches[1];
-    if (redispatch?.type === 'step_dispatched') {
+    if (
+      redispatch?.type === 'step_dispatched' &&
+      redispatch.stepType === 'script'
+    ) {
       expect(redispatch.command).not.toMatch(/\{\{/);
       expect(redispatch.command).toContain(`"${REVISION_NOTE}"`);
       // The re-run's command legitimately differs from the first dispatch.
       expect(redispatch.command).not.toBe(
-        dispatches[0]?.type === 'step_dispatched'
+        dispatches[0]?.type === 'step_dispatched' &&
+          dispatches[0].stepType === 'script'
           ? dispatches[0].command
           : undefined,
       );
@@ -891,5 +902,482 @@ describe('integration smoke: fake GitHub surface (create -> tick -> /approve com
     // The SAME card was re-rendered (renderCount bumped) — no second card minted.
     expect(tracker.cardState(FAKE_SURFACE_CARD.id)?.renderCount).toBe(2);
     expect(tracker.cardState('card-2')).toBeUndefined();
+  });
+});
+
+const agentWorkflowPath = resolve(
+  repoRoot,
+  'workflows',
+  'tiny-agent',
+  'workflow.yaml',
+);
+const AGENT_RUN_ID = '20260607T120000Z-tiny-agent-ab12';
+const TOPIC = 'autumn rain';
+
+/**
+ * The author prompt from the committed `workflows/tiny-agent/workflow.yaml`
+ * with `{{inputs.topic}}` resolved and `{{feedback.note}}` resolved to the
+ * empty string (YAML `>-` folds it to one line). On the first dispatch no prior
+ * `request_changes` decision exists, so the feedback token collapses to nothing
+ * and the prompt ends with the bare "…if present: " marker (trailing space).
+ * Pinned verbatim, like {@link GREETING}, so a drifted fixture fails here.
+ */
+const AGENT_AUTHOR_PROMPT = `Write a haiku about ${TOPIC}. Output only the three lines of the haiku, nothing else. Address this reviewer feedback if present: `;
+
+/** The reviewer's revision note, threaded into the re-dispatched prompt. */
+const AGENT_REVISION_NOTE = 'make it about maple leaves';
+
+/**
+ * The author prompt after a `request_changes(AGENT_REVISION_NOTE)`: because
+ * {@link AGENT_AUTHOR_PROMPT} ends with the trailing-space marker, the resolved
+ * revision prompt is simply the note appended. The re-dispatch legitimately
+ * differs from the first, and the stub keys its revised bytes off it.
+ */
+const AGENT_REVISION_PROMPT = `${AGENT_AUTHOR_PROMPT}${AGENT_REVISION_NOTE}`;
+
+/** The bytes the stub codex writes to every declared artifact path with no feedback. */
+const HAIKU =
+  'stub silicon mind\nwrites seventeen syllables\nthe contract is kept\n';
+
+/**
+ * The bytes the stub writes once reviewer feedback is present in the prompt:
+ * the base haiku plus a `Revision:` line carrying the note (mirroring
+ * `greet.sh`'s non-empty-feedback branch), so the revised artifact's
+ * bytes/sha256/size legitimately change across the request_changes round.
+ */
+const REVISED_HAIKU = `${HAIKU}Revision: ${AGENT_REVISION_NOTE}\n`;
+
+/**
+ * A hermetic stand-in for the Codex CLI. The agent executor spawns plain
+ * `codex` (resolved through `PATH`), so a stub dropped into a temp dir
+ * prepended to `PATH` intercepts the spawn with no real binary and no network.
+ *
+ * It honors the executor's actual argv contract: `-C <runDir>` names the run
+ * directory and the composed prompt is the final argument. Like a compliant
+ * agent, it reads its obligations from the prompt itself — extracting every
+ * backticked path from the `## Engine contract` block's artifact lines
+ * (`  - \`<path>\``) and writing the haiku there under the run dir — then
+ * exits zero.
+ *
+ * It is also feedback-aware, mirroring `greet.sh`'s non-empty branch: it reads
+ * the reviewer's note off the author line (everything after the "…if present: "
+ * marker on line 1 of the composed prompt) and, when that note is non-empty,
+ * appends a \`Revision: <note>\` line so the revised artifact's bytes/sha256
+ * legitimately change across a request_changes round. On the first dispatch the
+ * resolver substitutes \`{{feedback.note}}\` to empty, so the note is empty and
+ * the base haiku is written unchanged.
+ */
+const FEEDBACK_MARKER = 'Address this reviewer feedback if present: ';
+const STUB_CODEX = `#!/bin/sh
+run_dir=''
+prev=''
+for arg in "$@"; do
+  if [ "$prev" = '-C' ]; then run_dir=$arg; fi
+  prev=$arg
+done
+prompt=$prev
+
+feedback=$(printf '%s\\n' "$prompt" | sed -n '1s/.*${FEEDBACK_MARKER}//p')
+
+printf '%s\\n' "$prompt" | grep '^  - \`' | sed 's/^  - \`//; s/\`$//' \\
+  | while IFS= read -r path; do
+      mkdir -p "$run_dir/$(dirname "$path")"
+      if [ -n "$feedback" ]; then
+        printf '%sRevision: %s\\n' '${HAIKU}' "$feedback" > "$run_dir/$path"
+      else
+        printf '%s' '${HAIKU}' > "$run_dir/$path"
+      fi
+    done
+exit 0
+`;
+
+/**
+ * Restore `process.env.PATH` to a previously-captured value. When the original
+ * was unset, `delete` it rather than assigning — a bare `process.env.PATH =
+ * undefined` would coerce to the literal string `'undefined'` and poison PATH
+ * for later tests.
+ */
+function restorePath(original: string | undefined): void {
+  if (original === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = original;
+  }
+}
+
+/**
+ * The agent-step smoke (issue #62): the agent-twin of the gated block above. It
+ * drives the *real* CLI against the committed `workflows/tiny-agent/` package
+ * through the whole gated loop — `create -> tick` (the agent step runs, the
+ * gate opens) -> `command approve` -> `tick` -> `run_completed` — with the real
+ * `agentExecutor` spawning a stub `codex` off `PATH`, so CI proves the loop
+ * fully offline (the real `codex exec` demo is the live runbook's job,
+ * docs/live-demo-runbook.md, owned by #63).
+ *
+ * What only this test proves: the prompt recorded on `step_dispatched` is the
+ * exact composed bytes the subprocess receives (author text with the topic
+ * substituted + the appended `## Engine contract` block), and the artifact the
+ * *agent* wrote — at the path the contract block named, not a path the engine
+ * chose — is captured with path/sha256/size and carried to `run_completed`.
+ */
+describe('integration smoke: agent loop with stub codex (create -> tick -> approve -> tick)', () => {
+  let runsRoot: string;
+  let stubDir: string;
+  let originalPath: string | undefined;
+  let lines: string[];
+  let tracker: FakeTracker;
+
+  // One tracker shared across create + tick (production hits the same repo).
+  function deps(): Partial<CliDeps> {
+    return {
+      runsRoot,
+      now,
+      rand,
+      mintCommentId: () => 'comment-1',
+      makeTracker: () => tracker,
+      log: (line) => lines.push(line),
+    };
+  }
+
+  beforeEach(async () => {
+    runsRoot = await mkdtemp(join(tmpdir(), 'wm-smoke-agent-'));
+    stubDir = await mkdtemp(join(tmpdir(), 'wm-stub-codex-'));
+    await writeFile(join(stubDir, 'codex'), STUB_CODEX, { mode: 0o755 });
+    originalPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${originalPath ?? ''}`;
+    lines = [];
+    tracker = new FakeTracker();
+    process.env.WORKMACHINE_SANDBOX_REPO = 'acme/widgets';
+  });
+
+  afterEach(async () => {
+    restorePath(originalPath);
+    delete process.env.WORKMACHINE_SANDBOX_REPO;
+    await rm(stubDir, { recursive: true, force: true });
+    await rm(runsRoot, { recursive: true, force: true });
+  });
+
+  it('runs the committed tiny-agent package end to end against the stub', async () => {
+    await main(
+      ['run', 'create', agentWorkflowPath, '--input', `topic=${TOPIC}`],
+      deps(),
+    );
+    await main(['tick', AGENT_RUN_ID], deps());
+
+    const layout = resolveRunDir(runsRoot, AGENT_RUN_ID);
+    const log = new JsonlEventLog(layout.eventsLogPath);
+
+    // The agent step ran (the stub wrote the haiku), the gate opened, and the
+    // run stopped waiting — nothing terminal until a reviewer decides.
+    const opened = log.read();
+    expect(opened.map((e) => e.type)).toEqual([
+      'run_created',
+      'card_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+    ]);
+
+    // The recorded prompt is the FULL composed payload, byte for byte: the
+    // author text with the topic substituted (no tokens left) plus the engine
+    // contract block naming the declared artifact path.
+    const dispatched = opened[2];
+    expect(dispatched?.type).toBe('step_dispatched');
+    if (dispatched?.type === 'step_dispatched') {
+      expect(dispatched.stepType).toBe('agent');
+      if (dispatched.stepType === 'agent') {
+        expect(dispatched.prompt).not.toMatch(/\{\{/);
+        expect(dispatched.prompt).toContain(AGENT_AUTHOR_PROMPT);
+        expect(dispatched.prompt).toContain('## Engine contract');
+        expect(dispatched.prompt).toContain('`artifacts/haiku.txt`');
+        expect(dispatched.prompt).toBe(
+          composeAgentPrompt(AGENT_AUTHOR_PROMPT, [
+            { id: 'haiku', path: 'artifacts/haiku.txt' },
+          ]),
+        );
+      }
+    }
+
+    // Approve, then tick: the run advances past the gate to completed.
+    await main(['command', AGENT_RUN_ID, 'approve'], deps());
+    await main(['tick', AGENT_RUN_ID], deps());
+
+    const events = log.read();
+    expect(events.map((e) => e.type)).toEqual([
+      'run_created',
+      'card_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+      'command_received',
+      'gate_decided',
+      'run_completed',
+    ]);
+    const decided = events.find((e) => e.type === 'gate_decided');
+    expect(decided?.type).toBe('gate_decided');
+    if (decided?.type === 'gate_decided') {
+      expect(decided.decision).toBe('approve');
+    }
+
+    // The executor captured the artifact the STUB wrote at the contract-named
+    // path, with a real hash and size; the terminal event carries it too.
+    const succeeded = events.find((e) => e.type === 'step_succeeded');
+    expect(succeeded?.type).toBe('step_succeeded');
+    if (succeeded?.type === 'step_succeeded') {
+      expect(succeeded.artifacts).toHaveLength(1);
+      const [artifact] = succeeded.artifacts;
+      expect(artifact).toMatchObject({
+        id: 'haiku',
+        path: 'artifacts/haiku.txt',
+      });
+      expect(artifact?.sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(artifact?.size).toBeGreaterThan(0);
+    }
+    const completed = events.at(-1);
+    expect(completed?.type).toBe('run_completed');
+    if (completed?.type === 'run_completed') {
+      expect(completed.artifacts).toContainEqual(
+        expect.objectContaining({ id: 'haiku', path: 'artifacts/haiku.txt' }),
+      );
+    }
+
+    // The bytes on disk are exactly what the stub wrote.
+    expect(
+      readFileSync(join(layout.runDir, 'artifacts/haiku.txt'), 'utf8'),
+    ).toBe(HAIKU);
+
+    // The completed state is observable on disk, and a replay fold agrees.
+    const cache = parseYaml(readFileSync(layout.runCachePath, 'utf8')) as {
+      status: string;
+    };
+    expect(cache.status).toBe('completed');
+    expect(foldRun(events).status).toBe('completed');
+  });
+});
+
+/**
+ * The agent revision smoke (issue #75): the agent-twin of the feedback-loop
+ * block above. It drives the committed `workflows/tiny-agent/` package through
+ * the whole request-changes loop against a stub `codex`, fully offline —
+ * `create -> tick` (agent runs, gate opens) -> `command request_changes <note>`
+ * -> `tick` (the SAME gate re-dispatches the agent with the note resolved into
+ * the prompt) -> `command approve` -> `tick` -> `run_completed`.
+ *
+ * What only this test proves: the fixture threads `{{feedback.note}}` into the
+ * agent prompt, so the SECOND `step_dispatched.prompt` carries the reviewer's
+ * note verbatim and differs from the first; the feedback-aware stub therefore
+ * writes visibly different bytes on the re-run, so the artifact's sha256/size
+ * change across the round; and the loop reuses the one review card (ADR-0004,
+ * one card per gate) rather than minting a second.
+ */
+describe('integration smoke: agent revision loop with stub codex (request_changes -> tick -> approve -> tick)', () => {
+  let runsRoot: string;
+  let stubDir: string;
+  let originalPath: string | undefined;
+  let lines: string[];
+  let tracker: FakeTracker;
+
+  // One tracker shared across create + every tick, as production hits one repo:
+  // the card opened at create is the card the gate re-renders into on revision.
+  function deps(): Partial<CliDeps> {
+    return {
+      runsRoot,
+      now,
+      rand,
+      mintCommentId: () => 'comment-1',
+      makeTracker: () => tracker,
+      log: (line) => lines.push(line),
+    };
+  }
+
+  /** Create the agent run, then tick once so the agent runs and the gate opens. */
+  async function createAndOpenGate(): Promise<JsonlEventLog> {
+    await main(
+      ['run', 'create', agentWorkflowPath, '--input', `topic=${TOPIC}`],
+      deps(),
+    );
+    await main(['tick', AGENT_RUN_ID], deps());
+    return new JsonlEventLog(
+      resolveRunDir(runsRoot, AGENT_RUN_ID).eventsLogPath,
+    );
+  }
+
+  function snapshot() {
+    return loadWorkflowFile(
+      resolveRunDir(runsRoot, AGENT_RUN_ID).workflowSnapshotPath,
+    );
+  }
+
+  beforeEach(async () => {
+    runsRoot = await mkdtemp(join(tmpdir(), 'wm-smoke-agent-rev-'));
+    stubDir = await mkdtemp(join(tmpdir(), 'wm-stub-codex-'));
+    await writeFile(join(stubDir, 'codex'), STUB_CODEX, { mode: 0o755 });
+    originalPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${originalPath ?? ''}`;
+    lines = [];
+    tracker = new FakeTracker();
+    process.env.WORKMACHINE_SANDBOX_REPO = 'acme/widgets';
+  });
+
+  afterEach(async () => {
+    restorePath(originalPath);
+    delete process.env.WORKMACHINE_SANDBOX_REPO;
+    await rm(stubDir, { recursive: true, force: true });
+    await rm(runsRoot, { recursive: true, force: true });
+  });
+
+  it('re-dispatches the agent with the reviewer note, revising the artifact in the same card', async () => {
+    const layout = resolveRunDir(runsRoot, AGENT_RUN_ID);
+    const artifactPath = join(layout.runDir, 'artifacts/haiku.txt');
+    const log = await createAndOpenGate();
+
+    // First dispatch: no prior decision, so {{feedback.note}} resolves to empty
+    // and the composed prompt is the base author text (bare marker, no note).
+    const firstDispatch = log.read().find((e) => e.type === 'step_dispatched');
+    expect(firstDispatch?.type).toBe('step_dispatched');
+    if (
+      firstDispatch?.type === 'step_dispatched' &&
+      firstDispatch.stepType === 'agent'
+    ) {
+      expect(firstDispatch.prompt).not.toMatch(/\{\{/);
+      expect(firstDispatch.prompt).not.toContain(AGENT_REVISION_NOTE);
+      expect(firstDispatch.prompt).toBe(
+        composeAgentPrompt(AGENT_AUTHOR_PROMPT, [
+          { id: 'haiku', path: 'artifacts/haiku.txt' },
+        ]),
+      );
+    }
+
+    // The gate opened and its single card was rendered once — no reviewer
+    // decision yet, so nothing terminal.
+    expect(log.read().map((e) => e.type)).toEqual([
+      'run_created',
+      'card_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+    ]);
+    expect(tracker.cardState(FAKE_SURFACE_CARD.id)?.renderCount).toBe(1);
+    expect(tracker.cardState('card-2')).toBeUndefined();
+
+    // The first-round artifact is the base haiku the stub wrote with no feedback.
+    const firstBytes = readFileSync(artifactPath, 'utf8');
+    expect(firstBytes).toBe(HAIKU);
+
+    // Request changes, then tick: the SAME gate's step re-dispatches with the
+    // feedback resolved into the prompt — no new gate id is minted.
+    await main(
+      ['command', AGENT_RUN_ID, 'request_changes', AGENT_REVISION_NOTE],
+      deps(),
+    );
+    await main(['tick', AGENT_RUN_ID], deps());
+
+    const afterRevision = log.read();
+    expect(afterRevision.map((e) => e.type)).toEqual([
+      'run_created',
+      'card_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+      'command_received',
+      'gate_decided',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+    ]);
+
+    // The loop reused the one gate (ADR-0004 — one card per gate): every
+    // gate_opened targets the same gate id, and the run is back at that gate.
+    const gateIds = afterRevision
+      .filter((e) => e.type === 'gate_opened')
+      .map((e) => (e.type === 'gate_opened' ? e.gateId : ''));
+    expect(gateIds).toEqual(['review', 'review']);
+    expect(foldRunState(snapshot(), afterRevision).openGate).toEqual({
+      gateId: 'review',
+      stepId: 'review',
+    });
+
+    // The SECOND dispatch's prompt carries the reviewer's note verbatim and
+    // legitimately differs from the first — the determinism guarantee: replay
+    // reproduces the exact composed bytes the agent received.
+    const dispatches = afterRevision.filter(
+      (e) => e.type === 'step_dispatched',
+    );
+    expect(dispatches).toHaveLength(2);
+    const redispatch = dispatches[1];
+    expect(redispatch?.type).toBe('step_dispatched');
+    if (
+      redispatch?.type === 'step_dispatched' &&
+      redispatch.stepType === 'agent'
+    ) {
+      expect(redispatch.prompt).not.toMatch(/\{\{/);
+      expect(redispatch.prompt).toContain(AGENT_REVISION_NOTE);
+      expect(redispatch.prompt).toBe(
+        composeAgentPrompt(AGENT_REVISION_PROMPT, [
+          { id: 'haiku', path: 'artifacts/haiku.txt' },
+        ]),
+      );
+      // …and legitimately differs from the first dispatch's composed bytes.
+      expect(redispatch.prompt).not.toBe(
+        composeAgentPrompt(AGENT_AUTHOR_PROMPT, [
+          { id: 'haiku', path: 'artifacts/haiku.txt' },
+        ]),
+      );
+    }
+
+    // The revised artifact the agent wrote carries the Revision line, so its
+    // bytes — and the recorded sha256/size — change across the round.
+    const revisedBytes = readFileSync(artifactPath, 'utf8');
+    expect(revisedBytes).toBe(REVISED_HAIKU);
+    expect(revisedBytes).not.toBe(firstBytes);
+
+    const successes = afterRevision.filter((e) => e.type === 'step_succeeded');
+    expect(successes).toHaveLength(2);
+    const hashes = successes.map((e) =>
+      e.type === 'step_succeeded' ? e.artifacts[0]?.sha256 : undefined,
+    );
+    expect(hashes[0]).toMatch(/^[0-9a-f]{64}$/);
+    expect(hashes[1]).toMatch(/^[0-9a-f]{64}$/);
+    expect(hashes[1]).not.toBe(hashes[0]);
+
+    // The SAME card was re-rendered (renderCount bumped) — no second card minted.
+    expect(tracker.cardState(FAKE_SURFACE_CARD.id)?.renderCount).toBe(2);
+    expect(tracker.cardState('card-2')).toBeUndefined();
+
+    // Approve, then tick: the fresh command binds to the re-opened gate (not the
+    // spent request_changes), so the run folds to completed.
+    await main(['command', AGENT_RUN_ID, 'approve'], deps());
+    await main(['tick', AGENT_RUN_ID], deps());
+
+    const final = log.read();
+    expect(final.map((e) => e.type)).toEqual([
+      'run_created',
+      'card_created',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+      'command_received',
+      'gate_decided',
+      'step_dispatched',
+      'step_succeeded',
+      'gate_opened',
+      'command_received',
+      'gate_decided',
+      'run_completed',
+    ]);
+    const decisions = final
+      .filter((e) => e.type === 'gate_decided')
+      .map((e) => (e.type === 'gate_decided' ? e.decision : ''));
+    expect(decisions).toEqual(['request_changes', 'approve']);
+
+    const state = foldRunState(snapshot(), final);
+    expect(state.status).toBe('completed');
+    expect(state.steps.review?.status).toBe('approved');
+    expect(foldRun(final).status).toBe('completed');
+
+    // The revised bytes are what remain on disk, and re-ticking is a no-op.
+    expect(readFileSync(artifactPath, 'utf8')).toBe(REVISED_HAIKU);
+    await main(['tick', AGENT_RUN_ID], deps());
+    expect(log.read()).toEqual(final);
   });
 });

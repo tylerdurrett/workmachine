@@ -1,13 +1,18 @@
 import { z } from 'zod';
-import { isScriptStep, type WorkflowDefinition } from './schema.js';
+import {
+  isAgentStep,
+  isScriptStep,
+  isTemplatedStep,
+  type WorkflowDefinition,
+} from './schema.js';
 
 /**
  * Static validation of `{{...}}` interpolation references (AC#2).
  *
- * The loader never substitutes values — that is the resolver's job (#11). This
- * pass only checks that every interpolation token in a step's `run` command and
- * in each produced artifact's `path` points at something the workflow actually
- * declares:
+ * The loader never substitutes values — that is the resolver's job (#11). A
+ * step's templated TEXT (a script step's `run`, an agent step's `prompt`) may
+ * carry resolvable interpolation; this pass checks that every token there points
+ * at something the workflow actually declares:
  *  - `{{inputs.<name>}}` must name a declared input.
  *  - `{{artifacts.<id>.path}}` must name an artifact some step `produces` (an
  *    unresolved one is the "dangling artifact ref" the contract calls out).
@@ -17,6 +22,13 @@ import { isScriptStep, type WorkflowDefinition } from './schema.js';
  *    `request_changes` decision, supplied by the resolver, not by the workflow.
  *  - anything else (unknown namespace, `{{artifacts.x.size}}`, malformed
  *    tokens) is unsupported in this slice and rejected.
+ *
+ * A produced artifact's `path` is different in kind: it is a STATIC fact, not
+ * templated text, and may NOT contain any token at all. The resolver uses the
+ * declared path verbatim, capture existence-checks it literally, and replay
+ * reads it back unchanged — so a `{{...}}` token there would be a promise the
+ * runtime can't keep. We therefore reject ANY token in `produces[].path`,
+ * regardless of whether it would otherwise resolve (#71).
  *
  * Failures are returned as `z.ZodIssue[]` (not thrown) so the loader can merge
  * them with the DAG pass into a single `z.ZodError`. Paths point at the precise
@@ -52,7 +64,7 @@ export function validateInterpolationRefs(
   const declaredInputs = new Set(Object.keys(def.inputs));
   const producedIds = new Set(
     def.steps.flatMap((step) =>
-      isScriptStep(step) ? step.produces.map((a) => a.id) : [],
+      isTemplatedStep(step) ? step.produces.map((a) => a.id) : [],
     ),
   );
 
@@ -101,13 +113,37 @@ export function validateInterpolationRefs(
     }
   };
 
+  // A produced artifact `path` is a static fact, not templated text: reject ANY
+  // `{{...}}` token in it (even one that would otherwise resolve). The resolver
+  // uses the declared path verbatim, so a token there could never be kept.
+  const rejectPathTokens = (text: string, path: (string | number)[]): void => {
+    for (const [, inner] of text.matchAll(TOKEN_RE)) {
+      issues.push({
+        code: z.ZodIssueCode.custom,
+        path,
+        message: `interpolation token '{{${inner ?? ''}}}' is not allowed in a produced artifact path; declared paths must be static`,
+      });
+    }
+  };
+
   def.steps.forEach((step, stepIndex) => {
-    // Only script steps carry interpolatable text; gate steps have no `run` or
-    // produced paths.
-    if (!isScriptStep(step)) return;
-    check(step.run, ['steps', stepIndex, 'run']);
+    // Only script and agent steps carry interpolatable text; gate steps have
+    // no templated command/prompt or produced paths.
+    if (isScriptStep(step)) {
+      check(step.run, ['steps', stepIndex, 'run']);
+    } else if (isAgentStep(step)) {
+      check(step.prompt, ['steps', stepIndex, 'prompt']);
+    } else {
+      return;
+    }
     step.produces.forEach((artifact, pathIndex) => {
-      check(artifact.path, ['steps', stepIndex, 'produces', pathIndex, 'path']);
+      rejectPathTokens(artifact.path, [
+        'steps',
+        stepIndex,
+        'produces',
+        pathIndex,
+        'path',
+      ]);
     });
   });
 

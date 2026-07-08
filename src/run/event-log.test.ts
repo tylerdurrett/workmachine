@@ -23,6 +23,7 @@ const sampleLog: EngineEvent[] = [
     seq: 1,
     ts: '2026-06-07T12:00:01.000Z',
     stepId: 'greet',
+    stepType: 'script',
     command: 'echo "hello world" > artifacts/greeting.txt',
   },
   {

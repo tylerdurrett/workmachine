@@ -1,10 +1,28 @@
 import { describe, expect, it } from 'vitest';
 import type { EngineEvent } from '../domain/index.js';
-import { isScriptStep, loadWorkflow } from '../workflow/index.js';
-import type { ScriptStep, WorkflowDefinition } from '../workflow/index.js';
-import { resolveCommand } from './resolver.js';
+import { isAgentStep, isScriptStep, loadWorkflow } from '../workflow/index.js';
+import type {
+  AgentStep,
+  ScriptStep,
+  WorkflowDefinition,
+} from '../workflow/index.js';
+import { resolveStep } from './resolver.js';
 
 const runId = '20260607T120000Z-tiny-smoke-ab12';
+
+/**
+ * Resolve a script step's `run` to just its command string. This is the
+ * script-specific convenience the old `resolveCommand` export provided; it now
+ * lives here as a test helper over the real {@link resolveStep} path so the
+ * substitution assertions below stay unchanged without a production export.
+ */
+function resolveCommand(
+  workflow: WorkflowDefinition,
+  step: ScriptStep,
+  events: readonly EngineEvent[],
+): string {
+  return resolveStep(workflow, step, events).command;
+}
 
 /** Build a `run_created` event seeding the log with the run's inputs. */
 function created(inputs: Record<string, unknown> = {}): EngineEvent {
@@ -15,6 +33,24 @@ function created(inputs: Record<string, unknown> = {}): EngineEvent {
     ts: '2026-06-07T12:00:00.000Z',
     workflowSlug: 'tiny-smoke',
     inputs,
+  };
+}
+
+/** A `gate_decided` event closing a gate with the given decision/feedback. */
+function gateDecided(
+  seq: number,
+  decision: 'approve' | 'request_changes' | 'reject',
+  feedback?: string,
+): EngineEvent {
+  return {
+    type: 'gate_decided',
+    runId,
+    seq,
+    ts: '2026-06-07T12:00:00.000Z',
+    gateId: 'review',
+    decision,
+    actor: 'reviewer',
+    ...(feedback !== undefined && { feedback }),
   };
 }
 
@@ -76,6 +112,31 @@ steps:
       created({ msg: 'hi' }),
     ]);
     expect(command).toBe("printf 'hi' > artifacts/out.txt");
+  });
+
+  it('resolves an {{artifacts.*.path}} token produced by an agent step', () => {
+    // The loader admits a script step referencing an agent-produced artifact;
+    // the resolver must see the same declared set or a loader-valid workflow
+    // would throw at dispatch.
+    const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a draft into {{artifacts.draft.path}}'
+    produces:
+      - id: draft
+        path: artifacts/draft.md
+  - id: publish
+    type: script
+    run: 'cat {{artifacts.draft.path}}'
+`);
+    const publish = workflow.steps.find((s) => s.id === 'publish');
+    if (publish === undefined || !isScriptStep(publish)) {
+      throw new Error('test workflow has no publish script step');
+    }
+    const command = resolveCommand(workflow, publish, [created()]);
+    expect(command).toBe('cat artifacts/draft.md');
   });
 
   it('tolerates inner whitespace in a token, mirroring the loader grammar', () => {
@@ -177,24 +238,6 @@ steps:
     ).toThrow(/cannot resolve \{\{inputs\.msg\}\}/);
   });
 
-  /** A `gate_decided` event closing a gate with the given decision/feedback. */
-  function gateDecided(
-    seq: number,
-    decision: 'approve' | 'request_changes' | 'reject',
-    feedback?: string,
-  ): EngineEvent {
-    return {
-      type: 'gate_decided',
-      runId,
-      seq,
-      ts: '2026-06-07T12:00:00.000Z',
-      gateId: 'review',
-      decision,
-      actor: 'reviewer',
-      ...(feedback !== undefined && { feedback }),
-    };
-  }
-
   const feedbackWorkflow = (): WorkflowDefinition =>
     loadWorkflow(`
 slug: tiny-smoke
@@ -261,11 +304,164 @@ steps:
         seq: 1,
         ts: '2026-06-07T12:00:01.000Z',
         stepId: 'greet',
+        stepType: 'script',
         command: "printf 'stale'",
       },
     ];
     expect(resolveCommand(workflow, stepOf(workflow), events)).toBe(
       "printf 'from-log'",
+    );
+  });
+});
+
+describe('resolveStep (per-step-kind resolution into the ResolvedStep union)', () => {
+  /** The first agent step in the workflow, for prompt-resolution cases. */
+  function agentStepOf(workflow: WorkflowDefinition): AgentStep {
+    const step = workflow.steps.find(isAgentStep);
+    if (step === undefined) {
+      throw new Error('test workflow has no agent step');
+    }
+    return step;
+  }
+
+  it('resolves a script step into the script variant, substituting its command', () => {
+    const workflow = loadWorkflow(`
+slug: tiny-smoke
+inputs:
+  msg: {}
+steps:
+  - id: greet
+    type: script
+    run: "printf '{{inputs.msg}}' > {{artifacts.out.path}}"
+    produces:
+      - id: out
+        path: artifacts/out.txt
+`);
+    const step = stepOf(workflow);
+    const events = [created({ msg: 'hi' })];
+
+    expect(resolveStep(workflow, step, events)).toEqual({
+      type: 'script',
+      id: 'greet',
+      command: "printf 'hi' > artifacts/out.txt",
+      produces: [{ id: 'out', path: 'artifacts/out.txt' }],
+    });
+  });
+
+  it('substitutes all three namespaces in an agent prompt through the shared grammar', () => {
+    const workflow = loadWorkflow(`
+slug: tiny-smoke
+inputs:
+  topic: {}
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write about {{inputs.topic}} into {{artifacts.draft.path}}. Reviewer said: {{feedback.note}}'
+    produces:
+      - id: draft
+        path: artifacts/draft.md
+`);
+    const resolved = resolveStep(workflow, agentStepOf(workflow), [
+      created({ topic: 'gates' }),
+      gateDecided(1, 'request_changes', 'shorter please'),
+    ]);
+
+    expect(resolved).toEqual({
+      type: 'agent',
+      id: 'draft',
+      prompt:
+        'Write about gates into artifacts/draft.md. Reviewer said: shorter please',
+      produces: [{ id: 'draft', path: 'artifacts/draft.md' }],
+    });
+  });
+
+  it('resolves {{feedback.*}} in a prompt to an empty default on the first dispatch', () => {
+    const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Revise per: {{feedback.note}}'
+`);
+    const resolved = resolveStep(workflow, agentStepOf(workflow), [created()]);
+    expect(resolved.prompt).toBe('Revise per: ');
+  });
+
+  it('uses the latest request_changes feedback in a prompt across revision rounds', () => {
+    const workflow = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Revise per: {{feedback.note}}'
+`);
+    const resolved = resolveStep(workflow, agentStepOf(workflow), [
+      created(),
+      gateDecided(1, 'request_changes', 'first round'),
+      gateDecided(2, 'request_changes', 'second round'),
+    ]);
+    expect(resolved.prompt).toBe('Revise per: second round');
+  });
+
+  it('passes the model through when set and omits the key when absent', () => {
+    const withModel = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a draft.'
+    model: gpt-5.1-codex
+`);
+    const withoutModel = loadWorkflow(`
+slug: tiny-smoke
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write a draft.'
+`);
+    expect(
+      resolveStep(withModel, agentStepOf(withModel), [created()]).model,
+    ).toBe('gpt-5.1-codex');
+    expect(
+      resolveStep(withoutModel, agentStepOf(withoutModel), [created()]),
+    ).not.toHaveProperty('model');
+  });
+
+  it('throws a clear error when a prompt token references an absent binding', () => {
+    const workflow = loadWorkflow(`
+slug: tiny-smoke
+inputs:
+  topic: {}
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write about {{inputs.topic}}'
+`);
+    expect(() =>
+      resolveStep(workflow, agentStepOf(workflow), [created({})]),
+    ).toThrow(/cannot resolve \{\{inputs\.topic\}\} in step 'draft'/);
+  });
+
+  it('is a pure function of (workflow, step, events): same inputs, same output', () => {
+    const workflow = loadWorkflow(`
+slug: tiny-smoke
+inputs:
+  topic: {}
+steps:
+  - id: draft
+    type: agent
+    prompt: 'Write about {{inputs.topic}} into {{artifacts.draft.path}}'
+    produces:
+      - id: draft
+        path: artifacts/draft.md
+`);
+    const events = [created({ topic: 'purity' })];
+    const step = agentStepOf(workflow);
+
+    // No filesystem, clock, or randomness feeds resolution: re-resolving the
+    // same (workflow, step, events) yields a deeply identical value.
+    expect(resolveStep(workflow, step, events)).toEqual(
+      resolveStep(workflow, step, events),
     );
   });
 });
